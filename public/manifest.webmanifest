@@ -1,0 +1,20 @@
+{
+  "name": "AstroSnap – Asztrofotó asszisztens",
+  "short_name": "AstroSnap",
+  "description": "Telefonos asztrofotó alkalmazás: automatikus beállítások égbolt és célpont alapján, korrekciós fotók, képek egybeillesztése és színkorrekció.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#050810",
+  "theme_color": "#050810",
+  "categories": ["photography", "education", "utilities"],
+  "lang": "hu",
+  "icons": [
+    {
+      "src": "/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
