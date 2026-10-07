@@ -344,50 +344,170 @@ export function CaptureTab({
   }, [stream]);
 
   // Egy kép rögzítése és mentése
+  // Ha az expozíció > 0.5s és a "hosszú expozíció mód" aktív,
+  // több képkockát készít és átlagolja őket (effektív hosszú expozíció).
+  // Különben az ImageCapture API-t használja (teljes szenzor felbontás) ha elérhető.
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [captureProgress, setCaptureProgress] = useState(0);
+
   const captureAndStore = useCallback(async () => {
     if (!videoRef.current || !canvasRef.current) return null;
+    setIsCapturing(true);
+    setCaptureProgress(0);
+    try {
+      const video = videoRef.current;
+      const mainCanvas = canvasRef.current;
 
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    canvas.width = video.videoWidth || 1920;
-    canvas.height = video.videoHeight || 1080;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      // Az expozíciós idő (másodperc). Ha > 0.5s és < 60s, érdemes "effektív hosszú expozíciót" használni
+      const exposureTime = settings.exposureSeconds;
+      const useEffectiveLongExposure = exposureTime >= 1;
 
-    // ImageData → StoredImage
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const blob = await imageDataToBlob(imageData);
-    const thumbnail = await imageDataToThumbnail(imageData, 240);
+      let finalImageData: ImageData;
+      let actualWidth: number;
+      let actualHeight: number;
+      let framesCaptured = 1;
 
-    const stored: StoredImage = {
-      id: genId("light"),
-      type: "light",
-      target,
-      blob,
-      thumbnail,
-      capturedAt: Date.now(),
-      settings: {
-        iso: settings.iso,
-        exposureSeconds: settings.exposureSeconds,
-        whiteBalanceK: settings.whiteBalanceK,
-      },
-      metadata: {
-        width: canvas.width,
-        height: canvas.height,
-        iso: settings.iso,
-        exposureSeconds: settings.exposureSeconds,
-        bortle: sky.bortle,
-        equipment,
-        label: `${TARGETS.find((t) => t.type === target)?.label ?? "Light"} • ${formatExposure(
-          settings.exposureSeconds
-        )}`,
-      },
-    };
+      if (useEffectiveLongExposure) {
+        // === EFFEKTV HOSSZÚ EXPOZÍCIÓ ===
+        // A webböngészők nem tudnak valódi hosszú expozíciót, ezért
+        // több képkockát készítünk a video stream-ből és átlagoljuk.
+        // A képkockák száma a kívánt expozíciótól függ (max 30 frame)
+        const targetFrames = Math.min(30, Math.max(5, Math.round(exposureTime / 0.5)));
+        // Idő a képkockák között (ms) - 50ms alapból, de lehet gyorsabb
+        const frameDelayMs = 80;
 
-    await saveImage(stored);
-    return stored;
-  }, [settings, target, sky, equipment]);
+        // Első képkocka a referenciához - méretekből
+        const firstCanvas = document.createElement("canvas");
+        firstCanvas.width = video.videoWidth || 1920;
+        firstCanvas.height = video.videoHeight || 1080;
+        const firstCtx = firstCanvas.getContext("2d", { willReadFrequently: true })!;
+        firstCtx.drawImage(video, 0, 0, firstCanvas.width, firstCanvas.height);
+        const firstData = firstCtx.getImageData(0, 0, firstCanvas.width, firstCanvas.height);
+        actualWidth = firstCanvas.width;
+        actualHeight = firstCanvas.height;
+
+        // Akkumulátor a pixelek összegzéséhez (Float32 a pontosság miatt)
+        const accumulator = new Float32Array(firstData.data.length);
+        for (let i = 0; i < firstData.data.length; i++) {
+          accumulator[i] = firstData.data[i];
+        }
+        framesCaptured = 1;
+        setCaptureProgress(Math.round((framesCaptured / targetFrames) * 100));
+
+        // További képkockák gyűjtése
+        for (let f = 1; f < targetFrames; f++) {
+          await new Promise((resolve) => setTimeout(resolve, frameDelayMs));
+          // Ellenőrizzük, hogy a video még mindig aktív
+          if (video.readyState !== 4) continue;
+          firstCtx.drawImage(video, 0, 0, firstCanvas.width, firstCanvas.height);
+          const frameData = firstCtx.getImageData(0, 0, firstCanvas.width, firstCanvas.height);
+          for (let i = 0; i < frameData.data.length; i++) {
+            accumulator[i] += frameData.data[i];
+          }
+          framesCaptured++;
+          setCaptureProgress(Math.round((framesCaptured / targetFrames) * 100));
+        }
+
+        // Átlagolás
+        const avgData = new Uint8ClampedArray(accumulator.length);
+        for (let i = 0; i < accumulator.length; i++) {
+          avgData[i] = Math.round(accumulator[i] / framesCaptured);
+        }
+        finalImageData = new ImageData(avgData, actualWidth, actualHeight);
+      } else {
+        // === RÖVID EXPOZÍCIÓ - egyetlen képkocka ===
+        // Próbáljuk meg az ImageCapture API-t használni a teljes szenzor felbontásért
+        let capturedBlob: Blob | null = null;
+        try {
+          if (stream && typeof ImageCapture !== "undefined") {
+            const track = stream.getVideoTracks()[0];
+            if (track) {
+              const imageCapture = new ImageCapture(track);
+              // Próbáljuk meg a legmagasabb felbontást
+              try {
+                capturedBlob = await imageCapture.takePhoto({
+                  imageWidth: { ideal: 4096 },
+                  imageHeight: { ideal: 3072 },
+                });
+              } catch {
+                // Fallback: alapértelmezett beállítások
+                capturedBlob = await imageCapture.takePhoto();
+              }
+            }
+          }
+        } catch (e) {
+          console.warn("ImageCapture nem elérhető, canvas capture:", e);
+        }
+
+        if (capturedBlob) {
+          // ImageCapture sikerült - betöltjük képként és ImageData-vá alakítjuk
+          const tmpImg = new Image();
+          const url = URL.createObjectURL(capturedBlob);
+          await new Promise<void>((resolve, reject) => {
+            tmpImg.onload = () => resolve();
+            tmpImg.onerror = () => reject(new Error("Kép betöltése sikertelen"));
+            tmpImg.src = url;
+          });
+          actualWidth = tmpImg.naturalWidth;
+          actualHeight = tmpImg.naturalHeight;
+          mainCanvas.width = actualWidth;
+          mainCanvas.height = actualHeight;
+          const ctx = mainCanvas.getContext("2d")!;
+          ctx.drawImage(tmpImg, 0, 0, actualWidth, actualHeight);
+          finalImageData = ctx.getImageData(0, 0, actualWidth, actualHeight);
+          URL.revokeObjectURL(url);
+        } else {
+          // Fallback: video frame capture
+          actualWidth = video.videoWidth || 1920;
+          actualHeight = video.videoHeight || 1080;
+          mainCanvas.width = actualWidth;
+          mainCanvas.height = actualHeight;
+          const ctx = mainCanvas.getContext("2d")!;
+          ctx.drawImage(video, 0, 0, actualWidth, actualHeight);
+          finalImageData = ctx.getImageData(0, 0, actualWidth, actualHeight);
+        }
+      }
+
+      // Mentés: JPEG formátum a jobb minőség/fájlméret arányért
+      const blob = await imageDataToBlob(finalImageData);
+      const thumbnail = await imageDataToThumbnail(finalImageData, 400);
+
+      const stored: StoredImage = {
+        id: genId("light"),
+        type: "light",
+        target,
+        blob,
+        thumbnail,
+        capturedAt: Date.now(),
+        settings: {
+          iso: settings.iso,
+          exposureSeconds: settings.exposureSeconds,
+          whiteBalanceK: settings.whiteBalanceK,
+        },
+        metadata: {
+          width: actualWidth,
+          height: actualHeight,
+          iso: settings.iso,
+          exposureSeconds: settings.exposureSeconds,
+          bortle: sky.bortle,
+          equipment,
+          stackCount: framesCaptured > 1 ? framesCaptured : undefined,
+          label: `${TARGETS.find((t) => t.type === target)?.label ?? "Light"} • ${
+            framesCaptured > 1
+              ? `${framesCaptured} frame átlag • ${formatExposure(settings.exposureSeconds)}`
+              : formatExposure(settings.exposureSeconds)
+          }`,
+        },
+      };
+
+      await saveImage(stored);
+      setCaptureProgress(100);
+      return stored;
+    } finally {
+      setIsCapturing(false);
+      setTimeout(() => setCaptureProgress(0), 1000);
+    }
+  }, [settings, target, sky, equipment, stream]);
 
   // Várakozás előzár-idővel, visszaszámláló UI-jal
   const waitForPreShutterDelay = useCallback(
@@ -870,6 +990,53 @@ export function CaptureTab({
                         <X className="w-3 h-3 mr-1" />
                         Mégse
                       </Button>
+                    </div>
+                  )}
+
+                  {/* === CAPTURING OVERLAY (képkockák gyűjtése) === */}
+                  {isCapturing && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm z-40">
+                      <div className="text-[10px] uppercase tracking-widest text-emerald-300 mb-2">
+                        {settings.exposureSeconds >= 1
+                          ? `Effektív hosszú expozíció (${settings.exposureSeconds}s)`
+                          : "Kép rögzítése..."}
+                      </div>
+                      <div className="relative w-20 h-20 mb-4">
+                        <svg className="w-full h-full -rotate-90" viewBox="0 0 80 80">
+                          <circle
+                            cx="40"
+                            cy="40"
+                            r="34"
+                            fill="none"
+                            stroke="rgba(255,255,255,0.1)"
+                            strokeWidth="6"
+                          />
+                          <circle
+                            cx="40"
+                            cy="40"
+                            r="34"
+                            fill="none"
+                            stroke="#34d399"
+                            strokeWidth="6"
+                            strokeLinecap="round"
+                            strokeDasharray={`${(captureProgress / 100) * 213.6} 213.6`}
+                            className="transition-all duration-200"
+                          />
+                        </svg>
+                        <div className="absolute inset-0 flex items-center justify-center text-emerald-300 font-mono text-lg">
+                          {captureProgress}%
+                        </div>
+                      </div>
+                      {settings.exposureSeconds >= 1 && (
+                        <div className="text-xs text-slate-300 max-w-[80%] text-center">
+                          {settings.exposureSeconds}s expozíció →{" "}
+                          {Math.min(30, Math.max(5, Math.round(settings.exposureSeconds / 0.5)))}{" "}
+                          képkocka átlagolása a zaj csökkentéséért
+                        </div>
+                      )}
+                      <div className="text-[10px] text-amber-300 mt-3">
+                        Ne mozgasd a telefont!
+                      </div>
                     </div>
                   )}
 

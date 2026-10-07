@@ -12,6 +12,12 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -65,6 +71,7 @@ export function LibraryTab() {
   const [images, setImages] = useState<StoredImage[]>([]);
   const [filter, setFilter] = useState<FilterType>("all");
   const [loading, setLoading] = useState(true);
+  const [viewImage, setViewImage] = useState<StoredImage | null>(null);
   const { toast } = useToast();
 
   const refresh = useCallback(async () => {
@@ -91,8 +98,21 @@ export function LibraryTab() {
   const handleDelete = useCallback(
     async (id: string) => {
       await deleteImage(id);
+      // Ha a megtekintett képet töröljük, zárjuk be a modalt
+      if (viewImage?.id === id) setViewImage(null);
       refresh();
       toast({ title: "Kép törölve" });
+    },
+    [refresh, toast, viewImage]
+  );
+
+  const handleDeleteFromModal = useCallback(
+    async (img: StoredImage) => {
+      if (!confirm(`Biztosan törölni szeretnéd ezt a képet?\n\n${img.metadata?.label ?? img.id}`)) return;
+      await deleteImage(img.id);
+      setViewImage(null);
+      refresh();
+      toast({ title: "Kép törölve", description: img.metadata?.label });
     },
     [refresh, toast]
   );
@@ -227,6 +247,7 @@ export function LibraryTab() {
                     img={img}
                     onDelete={() => handleDelete(img.id)}
                     onDownload={() => handleDownload(img)}
+                    onView={() => setViewImage(img)}
                   />
                 ))}
               </div>
@@ -234,6 +255,192 @@ export function LibraryTab() {
           )}
         </CardContent>
       </Card>
+
+      {/* Kép megtekintő modal */}
+      <ImageViewerModal
+        image={viewImage}
+        onClose={() => setViewImage(null)}
+        onDelete={handleDeleteFromModal}
+        onDownload={handleDownload}
+      />
+    </div>
+  );
+}
+
+// === Kép megtekintő modal komponens ===
+function ImageViewerModal({
+  image,
+  onClose,
+  onDelete,
+  onDownload,
+}: {
+  image: StoredImage | null;
+  onClose: () => void;
+  onDelete: (img: StoredImage) => void;
+  onDownload: (img: StoredImage) => void;
+}) {
+  const fullUrl = useMemo(() => {
+    if (!image) return "";
+    return URL.createObjectURL(image.blob);
+  }, [image]);
+
+  useEffect(() => {
+    if (!fullUrl) return;
+    return () => URL.revokeObjectURL(fullUrl);
+  }, [fullUrl]);
+
+  if (!image) return null;
+
+  const formatSize = (bytes: number): string => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  };
+
+  const formatTime = (ts: number): string =>
+    new Date(ts).toLocaleString("hu-HU", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+
+  return (
+    <Dialog open={!!image} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="max-w-5xl w-[95vw] max-h-[95vh] bg-[#0c1322] border-white/20 p-0 overflow-hidden">
+        <DialogHeader className="px-4 py-3 border-b border-white/10">
+          <DialogTitle className="text-sm flex items-center gap-2 text-slate-200">
+            {TYPE_ICONS[image.type]}
+            <span className="capitalize">{image.type}</span>
+            <span className="text-slate-500">•</span>
+            <span className="text-slate-400 text-xs font-normal truncate">
+              {image.metadata?.label ?? image.id}
+            </span>
+          </DialogTitle>
+        </DialogHeader>
+
+        <div className="flex flex-col lg:flex-row max-h-[80vh]">
+          {/* Kép */}
+          <div className="flex-1 bg-black flex items-center justify-center overflow-auto min-h-[40vh]">
+            {fullUrl && (
+              <img
+                src={fullUrl}
+                alt={image.metadata?.label ?? "kép"}
+                className="max-w-full max-h-full object-contain"
+              />
+            )}
+          </div>
+
+          {/* Oldalsó panel: metaadatok és gombok */}
+          <div className="lg:w-72 p-4 border-t lg:border-t-0 lg:border-l border-white/10 bg-[#080d1a] overflow-y-auto">
+            <h3 className="text-xs uppercase tracking-wide text-slate-400 mb-3 font-semibold">
+              Kép adatai
+            </h3>
+            <div className="space-y-2 text-xs">
+              <MetaRow label="Típus" value={image.type} mono />
+              <MetaRow
+                label="Időbélyeg"
+                value={formatTime(image.capturedAt)}
+              />
+              <MetaRow
+                label="Felbontás"
+                value={
+                  image.metadata?.width
+                    ? `${image.metadata.width} × ${image.metadata.height} px`
+                    : "—"
+                }
+                mono
+              />
+              <MetaRow
+                label="Fájlméret"
+                value={formatSize(image.blob.size)}
+                mono
+              />
+              {image.metadata?.iso && (
+                <MetaRow label="ISO" value={image.metadata.iso.toString()} mono />
+              )}
+              {image.metadata?.exposureSeconds !== undefined && (
+                <MetaRow
+                  label="Expozíció"
+                  value={`${image.metadata.exposureSeconds}s`}
+                  mono
+                />
+              )}
+              {image.metadata?.bortle && (
+                <MetaRow label="Bortle" value={image.metadata.bortle.toString()} mono />
+              )}
+              {image.metadata?.equipment && (
+                <MetaRow label="Eszköz" value={image.metadata.equipment} />
+              )}
+              {image.metadata?.stackCount && (
+                <MetaRow
+                  label="Stack"
+                  value={`${image.metadata.stackCount} kép`}
+                  mono
+                />
+              )}
+            </div>
+
+            <div className="mt-4 space-y-2">
+              <Button
+                onClick={() => onDownload(image)}
+                className="w-full bg-sky-500/20 border border-sky-500/30 text-sky-300 hover:bg-sky-500/30"
+                size="sm"
+              >
+                <Download className="w-3.5 h-3.5 mr-1" />
+                Letöltés
+              </Button>
+              <Button
+                onClick={() => onDelete(image)}
+                variant="outline"
+                size="sm"
+                className="w-full border-red-500/30 text-red-300 hover:bg-red-500/10"
+              >
+                <Trash2 className="w-3.5 h-3.5 mr-1" />
+                Törlés
+              </Button>
+              <Button
+                onClick={onClose}
+                variant="outline"
+                size="sm"
+                className="w-full border-white/20 text-slate-300 hover:bg-white/5"
+              >
+                Bezárás
+              </Button>
+            </div>
+
+            <div className="mt-4 text-[10px] text-slate-500 leading-relaxed">
+              A kép a böngésző helyi tárhelyén (IndexedDB) van tárolva. Csak
+              ezen az eszközön érhető el.
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function MetaRow({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-slate-500">{label}</span>
+      <span
+        className={`text-slate-200 truncate ${
+          mono ? "font-mono text-[11px]" : ""
+        }`}
+      >
+        {value}
+      </span>
     </div>
   );
 }
@@ -242,10 +449,12 @@ function ImageCard({
   img,
   onDelete,
   onDownload,
+  onView,
 }: {
   img: StoredImage;
   onDelete: () => void;
   onDownload: () => void;
+  onView: () => void;
 }) {
   const thumbUrl = useMemo(() => URL.createObjectURL(img.thumbnail), [img.thumbnail]);
   useEffect(() => {
@@ -254,19 +463,24 @@ function ImageCard({
 
   return (
     <div className="group relative rounded-lg overflow-hidden border border-white/10 bg-[#080d1a]">
-      <div className="aspect-square">
+      {/* Kattintható kép - megnyitja a modalt */}
+      <button
+        onClick={onView}
+        className="block w-full aspect-square overflow-hidden"
+        title="Kattints a megtekintéshez"
+      >
         {thumbUrl ? (
           <img
             src={thumbUrl}
             alt={img.metadata?.label ?? "kép"}
-            className="w-full h-full object-cover"
+            className="w-full h-full object-cover transition-transform group-hover:scale-105"
           />
         ) : (
           <div className="w-full h-full bg-white/5 animate-pulse" />
         )}
-      </div>
+      </button>
       <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/30 to-transparent pointer-events-none" />
-      <div className="absolute top-1 left-1">
+      <div className="absolute top-1 left-1 pointer-events-none">
         <Badge
           variant="outline"
           className="bg-black/60 backdrop-blur text-[9px] border-white/20 text-slate-200 flex items-center gap-1"
@@ -275,7 +489,7 @@ function ImageCard({
           {img.type}
         </Badge>
       </div>
-      <div className="absolute bottom-0 left-0 right-0 p-2 text-[10px]">
+      <div className="absolute bottom-0 left-0 right-0 p-2 text-[10px] pointer-events-none">
         {img.metadata?.label && (
           <div className="font-medium truncate text-white">
             {img.metadata.label}
@@ -299,21 +513,32 @@ function ImageCard({
             : ""}
         </div>
       </div>
-      <div className="absolute top-1 right-1 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+      {/* Mindig látható gombok (nem csak hover-re) */}
+      <div className="absolute top-1 right-1 flex gap-1">
         <button
-          onClick={onDownload}
-          className="bg-sky-500/80 hover:bg-sky-500 text-white rounded p-1"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDownload();
+          }}
+          className="bg-sky-500/80 hover:bg-sky-500 text-white rounded p-1.5 transition"
           title="Letöltés"
         >
           <Download className="w-3 h-3" />
         </button>
         <button
-          onClick={onDelete}
-          className="bg-red-500/80 hover:bg-red-500 text-white rounded p-1"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+          className="bg-red-500/80 hover:bg-red-500 text-white rounded p-1.5 transition"
           title="Törlés"
         >
           <Trash2 className="w-3 h-3" />
         </button>
+      </div>
+      {/* "Megtekintés" jelzés a kép szélén */}
+      <div className="absolute bottom-1 right-1 bg-black/70 backdrop-blur text-[8px] text-slate-300 px-1.5 py-0.5 rounded pointer-events-none">
+        👁 Megnyit
       </div>
     </div>
   );
