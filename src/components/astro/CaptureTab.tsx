@@ -765,6 +765,7 @@ export function CaptureTab({
   }, [burstProgress, toast, cancelCountdown]);
 
   // Fájl feltöltése (támogatott alternatíva)
+  // DNG, BMP, JPEG, PNG, WEBP, TIFF, stb. formátumokat is tudunk feldolgozni
   const handleFileUpload = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const files = e.target.files;
@@ -772,37 +773,46 @@ export function CaptureTab({
 
       let successCount = 0;
       let failedCount = 0;
-      let unsupportedFormats: string[] = [];
+      let unsupportedRawFiles: string[] = [];
+      let dngCount = 0;
+
+      // Dinamikusan importáljuk a RAW dekódert (csak akkor, ha szükséges)
+      const { decodeImageFile, isOtherRawFile, isDngFile, getFileFormat } =
+        await import("@/lib/processing/rawDecoder");
+      const { imageDataToThumbnail } = await import("@/lib/processing/stacking");
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         const blob = file;
-        const fileName = file.name.toLowerCase();
-        const fileSize = file.size;
-
-        // RAW fájlok ellenőrzése - ezeket a böngésző nem tudja megjeleníteni
-        const rawExtensions = ['.dng', '.raw', '.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.pef', '.srw'];
-        const isRaw = rawExtensions.some(ext => fileName.endsWith(ext));
+        const fileName = file.name;
 
         try {
-          if (isRaw) {
-            // RAW fájloknál nem tudunk thumbnail-t generálni, csak mentjük a fájlt
-            // Egy placeholder thumbnail-t készítünk (fekete képernyő a fájl nevével)
+          // Ellenőrizzük, hogy nem támogatott RAW formátum-e (CR2, NEF, ARW stb.)
+          if (isOtherRawFile(fileName)) {
+            // Ezeket a formátumokat nem tudjuk dekódolni böngészőben
+            // Mentjük a fájlt, de jelzem, hogy nem lesz stackelhető
             const placeholderCanvas = document.createElement("canvas");
             placeholderCanvas.width = 400;
             placeholderCanvas.height = 400;
             const ctx = placeholderCanvas.getContext("2d")!;
             ctx.fillStyle = "#1a1a2e";
             ctx.fillRect(0, 0, 400, 400);
-            ctx.fillStyle = "#ec4899";
-            ctx.font = "bold 24px monospace";
+            ctx.fillStyle = "#ef4444";
+            ctx.font = "bold 22px monospace";
             ctx.textAlign = "center";
-            ctx.fillText("RAW", 200, 180);
+            ctx.fillText("NEM TÁMOGATOTT", 200, 180);
+            ctx.fillStyle = "#fbbf24";
+            ctx.font = "14px monospace";
+            ctx.fillText(getFileFormat(fileName), 200, 215);
             ctx.fillStyle = "#94a3b8";
-            ctx.font = "12px sans-serif";
-            ctx.fillText(fileName.substring(0, 30), 200, 220);
+            ctx.font = "10px sans-serif";
+            ctx.fillText("Konvertáld DNG-re!", 200, 240);
             const placeholderBlob = await new Promise<Blob>((resolve, reject) => {
-              placeholderCanvas.toBlob((b) => b ? resolve(b) : reject(new Error("toBlob failed")), "image/jpeg", 0.7);
+              placeholderCanvas.toBlob(
+                (b) => (b ? resolve(b) : reject(new Error("toBlob failed"))),
+                "image/jpeg",
+                0.7
+              );
             });
 
             const stored: StoredImage = {
@@ -818,74 +828,58 @@ export function CaptureTab({
                 whiteBalanceK: settings.whiteBalanceK,
               },
               metadata: {
-                width: 0, // Nem ismert RAW formátum esetén
+                width: 0,
                 height: 0,
                 iso: settings.iso,
                 exposureSeconds: settings.exposureSeconds,
                 bortle: sky.bortle,
                 equipment,
-                label: `${file.name} (RAW - nincs előnézet)`,
+                label: `${file.name} (NEM TÁMOGATOTT RAW)`,
               },
             };
             await saveImage(stored);
+            unsupportedRawFiles.push(file.name);
             successCount++;
-            // Megjegyzés: a RAW fájlokat a stacking nem tudja feldolgozni
-            // (a böngésző nem tudja betölteni őket ImageData-vá)
-            unsupportedFormats.push(file.name);
-          } else {
-            // Normál kép (JPEG, PNG, WEBP, HEIC, BMP, TIFF) betöltése
-            // A createImageBitmap garantáltan a teljes felbontást adja vissza
-            // (az Image elem néha lementi a képet memória spórolás miatt)
-            const arrayBuffer = await file.arrayBuffer();
-            const bitmap = await createImageBitmap(blob, {
-              imageOrientation: "from-image", // EXIF orientáció alkalmazása
-            });
-            const w = bitmap.width;
-            const h = bitmap.height;
-
-            // ImageData létrehozása a bitmap-ből
-            const canvas = document.createElement("canvas");
-            // MaxDim 4096 a részletek megtartásához (régebben 2048 volt)
-            const maxDim = 4096;
-            const scale = Math.min(1, maxDim / Math.max(w, h));
-            const finalW = Math.round(w * scale);
-            const finalH = Math.round(h * scale);
-            canvas.width = finalW;
-            canvas.height = finalH;
-            const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
-            ctx.drawImage(bitmap, 0, 0, finalW, finalH);
-            const data = ctx.getImageData(0, 0, finalW, finalH);
-
-            // Thumbnail generálása
-            const thumbnail = await imageDataToThumbnail(data, 400);
-
-            bitmap.close();
-
-            const stored: StoredImage = {
-              id: genId("light"),
-              type: "light",
-              target,
-              blob, // Eredeti fájl (teljes felbontású JPEG/PNG)
-              thumbnail,
-              capturedAt: Date.now() + i,
-              settings: {
-                iso: settings.iso,
-                exposureSeconds: settings.exposureSeconds,
-                whiteBalanceK: settings.whiteBalanceK,
-              },
-              metadata: {
-                width: w, // Eredeti szélesség
-                height: h, // Eredeti magasság
-                iso: settings.iso,
-                exposureSeconds: settings.exposureSeconds,
-                bortle: sky.bortle,
-                equipment,
-                label: `${file.name} (${w}×${h})`,
-              },
-            };
-            await saveImage(stored);
-            successCount++;
+            continue;
           }
+
+          // DNG vagy más támogatott formátum - használjuk az univerzális dekódert
+          // Ez a createImageBitmap-hez képest meg tudja nyitni a DNG és TIFF fájlokat is
+          const imageData = await decodeImageFile(blob, fileName, 4096);
+          const w = imageData.width;
+          const h = imageData.height;
+
+          if (isDngFile(fileName)) {
+            dngCount++;
+          }
+
+          // Thumbnail generálása
+          const thumbnail = await imageDataToThumbnail(imageData, 400);
+
+          const stored: StoredImage = {
+            id: genId("light"),
+            type: "light",
+            target,
+            blob,
+            thumbnail,
+            capturedAt: Date.now() + i,
+            settings: {
+              iso: settings.iso,
+              exposureSeconds: settings.exposureSeconds,
+              whiteBalanceK: settings.whiteBalanceK,
+            },
+            metadata: {
+              width: w,
+              height: h,
+              iso: settings.iso,
+              exposureSeconds: settings.exposureSeconds,
+              bortle: sky.bortle,
+              equipment,
+              label: `${file.name} (${w}×${h}) ${getFileFormat(fileName)}`,
+            },
+          };
+          await saveImage(stored);
+          successCount++;
         } catch (err) {
           console.error(`Hiba a fájl betöltésekor (${file.name}):`, err);
           failedCount++;
@@ -895,15 +889,30 @@ export function CaptureTab({
       setCapturedCount((c) => c + successCount);
       onCaptured();
 
-      if (unsupportedFormats.length > 0) {
+      if (unsupportedRawFiles.length > 0) {
         toast({
-          title: "RAW fájlok feltöltve",
-          description: `${successCount} kép mentve. ⚠ ${unsupportedFormats.length} RAW fájl mentve, de a stacking nem tudja feldolgozni őket (böngésző korlát). Konvertáld JPEG/PNG-re a stackinghez!`,
+          title: "Nem támogatott RAW fájlok",
+          description: `${successCount} fájl mentve. ⚠ ${unsupportedRawFiles.length} db ${
+            unsupportedRawFiles[0].split(".").pop()?.toUpperCase()
+          } formátumú fájlt nem tudunk dekódolni. Konvertáld DNG-re (a legtöbb kamera tud DNG-t menteni)!`,
+          duration: 8000,
         });
-      } else if (failedCount > 0) {
+      } else if (dngCount > 0) {
+        toast({
+          title: "DNG fájlok feltöltve",
+          description: `${successCount} kép mentve (ebből ${dngCount} DNG/RAW). A stacking is tudja őket feldolgozni!`,
+          duration: 5000,
+        });
+      } else if (failedCount > 0 && successCount > 0) {
         toast({
           title: "Képek betöltve (részben)",
           description: `${successCount} sikerült, ${failedCount} sikertelen`,
+        });
+      } else if (failedCount > 0) {
+        toast({
+          title: "Sikertelen",
+          description: `${failedCount} képet nem sikerült betölteni`,
+          variant: "destructive",
         });
       } else {
         toast({

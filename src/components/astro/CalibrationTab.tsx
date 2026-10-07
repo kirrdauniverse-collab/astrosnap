@@ -298,34 +298,43 @@ export function CalibrationTab({ settings, onCaptured }: CalibrationTabProps) {
 
       let successCount = 0;
       let failedCount = 0;
+      let unsupportedRawFiles: string[] = [];
+
+      // Dinamikusan importáljuk a RAW dekódert
+      const { decodeImageFile, isOtherRawFile, getFileFormat } =
+        await import("@/lib/processing/rawDecoder");
+      const { imageDataToThumbnail } = await import("@/lib/processing/stacking");
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         const blob = file;
-        const fileName = file.name.toLowerCase();
-
-        // RAW fájlok ellenőrzése
-        const rawExtensions = ['.dng', '.raw', '.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.pef', '.srw'];
-        const isRaw = rawExtensions.some(ext => fileName.endsWith(ext));
+        const fileName = file.name;
 
         try {
-          if (isRaw) {
-            // RAW fájlok - placeholder thumbnail
+          if (isOtherRawFile(fileName)) {
+            // Nem támogatott RAW (CR2, NEF stb.) - placeholder thumbnail
             const placeholderCanvas = document.createElement("canvas");
             placeholderCanvas.width = 400;
             placeholderCanvas.height = 400;
             const ctx = placeholderCanvas.getContext("2d")!;
             ctx.fillStyle = "#1a1a2e";
             ctx.fillRect(0, 0, 400, 400);
-            ctx.fillStyle = "#ec4899";
-            ctx.font = "bold 24px monospace";
+            ctx.fillStyle = "#ef4444";
+            ctx.font = "bold 22px monospace";
             ctx.textAlign = "center";
-            ctx.fillText("RAW", 200, 180);
+            ctx.fillText("NEM TÁMOGATOTT", 200, 180);
+            ctx.fillStyle = "#fbbf24";
+            ctx.font = "14px monospace";
+            ctx.fillText(getFileFormat(fileName), 200, 215);
             ctx.fillStyle = "#94a3b8";
-            ctx.font = "12px sans-serif";
-            ctx.fillText(fileName.substring(0, 30), 200, 220);
+            ctx.font = "10px sans-serif";
+            ctx.fillText("Konvertáld DNG-re!", 200, 240);
             const placeholderBlob = await new Promise<Blob>((resolve, reject) => {
-              placeholderCanvas.toBlob((b) => b ? resolve(b) : reject(new Error("toBlob failed")), "image/jpeg", 0.7);
+              placeholderCanvas.toBlob(
+                (b) => (b ? resolve(b) : reject(new Error("toBlob failed"))),
+                "image/jpeg",
+                0.7
+              );
             });
 
             const stored: StoredImage = {
@@ -343,33 +352,19 @@ export function CalibrationTab({ settings, onCaptured }: CalibrationTabProps) {
                 height: 0,
                 iso: settings.iso,
                 exposureSeconds: settings.exposureSeconds,
-                label: `${file.name} (RAW)`,
+                label: `${file.name} (NEM TÁMOGATOTT RAW)`,
               },
             };
             await saveImage(stored);
+            unsupportedRawFiles.push(file.name);
             successCount++;
           } else {
-            // Normál kép - createImageBitmap a teljes felbontásért
-            const bitmap = await createImageBitmap(blob, {
-              imageOrientation: "from-image",
-            });
-            const w = bitmap.width;
-            const h = bitmap.height;
+            // DNG vagy támogatott formátum - univerzális dekóder
+            const imageData = await decodeImageFile(blob, fileName, 4096);
+            const w = imageData.width;
+            const h = imageData.height;
 
-            const canvas = document.createElement("canvas");
-            const maxDim = 4096;
-            const scale = Math.min(1, maxDim / Math.max(w, h));
-            const finalW = Math.round(w * scale);
-            const finalH = Math.round(h * scale);
-            canvas.width = finalW;
-            canvas.height = finalH;
-            const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
-            ctx.drawImage(bitmap, 0, 0, finalW, finalH);
-            const data = ctx.getImageData(0, 0, finalW, finalH);
-
-            const thumbnail = await imageDataToThumbnail(data, 400);
-
-            bitmap.close();
+            const thumbnail = await imageDataToThumbnail(imageData, 400);
 
             const stored: StoredImage = {
               id: genId(activeType),
@@ -386,7 +381,7 @@ export function CalibrationTab({ settings, onCaptured }: CalibrationTabProps) {
                 height: h,
                 iso: settings.iso,
                 exposureSeconds: settings.exposureSeconds,
-                label: `${file.name} (${w}×${h})`,
+                label: `${file.name} (${w}×${h}) ${getFileFormat(fileName)}`,
               },
             };
             await saveImage(stored);
@@ -400,7 +395,13 @@ export function CalibrationTab({ settings, onCaptured }: CalibrationTabProps) {
       onCaptured();
       refreshFrames();
 
-      if (failedCount > 0 && successCount > 0) {
+      if (unsupportedRawFiles.length > 0) {
+        toast({
+          title: "Nem támogatott RAW fájlok",
+          description: `${successCount} mentve. ⚠ ${unsupportedRawFiles.length} fájl nem dekódolható. Konvertáld DNG-re!`,
+          duration: 8000,
+        });
+      } else if (failedCount > 0 && successCount > 0) {
         toast({
           title: "Képek betöltve (részben)",
           description: `${successCount} sikerült, ${failedCount} sikertelen`,

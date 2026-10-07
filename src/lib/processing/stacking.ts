@@ -761,16 +761,95 @@ function combineImages(
 }
 
 // ----- Több StoredImage betöltése ImageData-vá -----
+// Ez a függvény a RAW dekódert is használja, így a DNG fájlokat is be tudja tölteni.
+// A fájl nevéből (a metadata.label-ből) felismeri, hogy DNG-e, vagy megpróbálja az univerzális dekódert.
 export async function loadStoredImagesAsImageData(
   images: StoredImage[],
   maxDim?: number,
   onProgress?: (p: number, msg: string) => void
 ): Promise<ImageData[]> {
   const out: ImageData[] = [];
+  // Dinamikusan importáljuk a RAW dekódert (csak ha szükséges)
+  const { decodeImageFile, isOtherRawFile } = await import("./rawDecoder");
+
   for (let i = 0; i < images.length; i++) {
     onProgress?.(i / images.length, `Kép betöltése: ${i + 1}/${images.length}`);
-    const img = await loadImageFromBlob(images[i].blob);
-    out.push(imageToImageData(img, maxDim));
+    const storedImage = images[i];
+    const label = storedImage.metadata?.label ?? "";
+    const blob = storedImage.blob;
+
+    // Ellenőrizzük a fájlnév/kiterjesztés alapján, hogy milyen típusú fájl
+    // A metadata.label-ben benne van a fájlnév, pl. "image.dng (4032×3024) DNG (RAW)"
+    // vagy "image.dng (NEM TÁMOGATOTT RAW)"
+    const isUnsupportedRaw = label.includes("NEM TÁMOGATOTT RAW");
+
+    if (isUnsupportedRaw) {
+      // Ha nem támogatott RAW, kihagyjuk (nem tudjuk feldolgozni)
+      console.warn(`Kihagyva (nem támogatott RAW): ${label}`);
+      continue;
+    }
+
+    // Megpróbáljuk megkeresni a fájl nevét a label-ből
+    // Ha a label "image.dng (4032×3024) DNG (RAW)", akkor a "image.dng" a fájlnév
+    let fileName = label.split(" (")[0];
+    if (!fileName || fileName === "") {
+      // Ha nincs label, generálunk egy nevet a típus alapján
+      fileName = `image_${i}.${storedImage.type}`;
+    }
+
+    try {
+      // Ha DNG vagy TIFF, a RAW dekódert használjuk
+      // Különben az univerzális dekódert (ami a createImageBitmap-ot használja)
+      const isDng = fileName.toLowerCase().endsWith(".dng") ||
+                    fileName.toLowerCase().endsWith(".tiff") ||
+                    fileName.toLowerCase().endsWith(".tif");
+      const isOtherRaw = isOtherRawFile(fileName);
+
+      if (isOtherRaw) {
+        console.warn(`Kihagyva (nem támogatott RAW): ${fileName}`);
+        continue;
+      }
+
+      if (isDng) {
+        // DNG/TIFF - RAW dekóder
+        const imageData = await decodeImageFile(blob, fileName, maxDim);
+        out.push(imageData);
+      } else {
+        // Normál kép - createImageBitmap (gyorsabb, mint az Image elem)
+        const bitmap = await createImageBitmap(blob, {
+          imageOrientation: "from-image",
+        });
+        const w = bitmap.width;
+        const h = bitmap.height;
+        const canvas = document.createElement("canvas");
+        const scale = maxDim ? Math.min(1, maxDim / Math.max(w, h)) : 1;
+        const finalW = Math.round(w * scale);
+        const finalH = Math.round(h * scale);
+        canvas.width = finalW;
+        canvas.height = finalH;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+        ctx.drawImage(bitmap, 0, 0, finalW, finalH);
+        bitmap.close();
+        out.push(ctx.getImageData(0, 0, finalW, finalH));
+      }
+    } catch (err) {
+      console.error(`Hiba a kép betöltésekor (${fileName}):`, err);
+      // Fallback: próbáljuk meg a régi Image elem módszert
+      try {
+        const url = URL.createObjectURL(blob);
+        const img = new Image();
+        await new Promise<void>((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error("Kép betöltése sikertelen"));
+          img.src = url;
+        });
+        out.push(imageToImageData(img, maxDim));
+        URL.revokeObjectURL(url);
+      } catch (fallbackErr) {
+        console.error(`Fallback is sikertelen (${fileName}):`, fallbackErr);
+        // Ha minden sikertelen, kihagyjuk ezt a képet
+      }
+    }
   }
   return out;
 }
