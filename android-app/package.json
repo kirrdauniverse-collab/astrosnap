@@ -1,0 +1,46 @@
+{
+  "name": "astrosnap-native",
+  "version": "1.0.0",
+  "description": "AstroSnap – Natív Android asztrofotó alkalmazás Camera2 API-val",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "cap:sync": "npm run build && npx cap sync android",
+    "cap:open": "npx cap open android",
+    "cap:run": "npm run build && npx cap sync android && npx cap run android",
+    "android:build": "npm run build && npx cap sync android && cd android && ./gradlew assembleDebug"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.0.0",
+    "@capacitor/core": "^6.0.0",
+    "@capacitor/filesystem": "^6.0.0",
+    "next": "^16.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.0.0",
+    "typescript": "^5.0.0",
+    "tailwindcss": "^4.0.0"
+  },
+  "capacitor": {
+    "appId": "hu.astrosnap.app",
+    "appName": "AstroSnap",
+    "webDir": "out",
+    "server": {
+      "androidScheme": "https"
+    },
+    "plugins": {
+      "Camera2Plugin": {
+        "permissions": [
+          "android.permission.CAMERA",
+          "android.permission.WRITE_EXTERNAL_STORAGE",
+          "android.permission.READ_EXTERNAL_STORAGE"
+        ]
+      }
+    }
+  }
+}
