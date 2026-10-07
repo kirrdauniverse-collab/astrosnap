@@ -124,28 +124,68 @@ export function CaptureTab({
   const { toast } = useToast();
 
   // Kamera indítása
+  // Megpróbáljuk a hátsó fő kamerát használni (zoom támogatással)
   const startCamera = useCallback(async () => {
     setError(null);
     try {
       if (stream) {
         stream.getTracks().forEach((t) => t.stop());
       }
+
+      // Először megpróbáljuk lekérdezni a rendelkezésre álló kamerákat,
+      // hogy kiválaszthassuk a hátsó fő kamerát (zoom támogatással)
+      let videoConstraints: MediaTrackConstraints = {
+        facingMode: facing,
+        width: { ideal: 4096 },
+        height: { ideal: 3072 },
+      };
+
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter((d) => d.kind === "videoinput");
+        console.log("📷 Elérhető kamerák:", videoDevices.length);
+        // Ha több kamera van, próbáljuk meg a hátsó fő kamerát kiválasztani
+        // A back camera általában a 0. vagy az utolsó - a facingMode(environment) általában ezt adja
+        if (videoDevices.length > 1 && facing === "environment") {
+          // A facingMode kulcsszó a modern Androidokon a fő hátsó kamerát adja
+          // A zoom támogatás ehhez a kamerához van
+          videoConstraints = {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 4096 },
+            height: { ideal: 3072 },
+          };
+        }
+      } catch (e) {
+        console.warn("Kamerák listázása sikertelen:", e);
+      }
+
       const newStream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: facing,
-          width: { ideal: 4096 },
-          height: { ideal: 3072 },
-        },
+        video: videoConstraints,
         audio: false,
       });
       setStream(newStream);
       if (videoRef.current) {
         videoRef.current.srcObject = newStream;
       }
-      toast({
-        title: "Kamera aktív",
-        description: `Facing: ${facing === "environment" ? "hátsó" : "első"}`,
-      });
+
+      // Indítás után azonnal kiírjuk a képességeket és a jelenlegi beállításokat
+      const track = newStream.getVideoTracks()[0];
+      if (track) {
+        const caps = (track.getCapabilities?.() ?? {}) as Record<string, unknown>;
+        const settings = (track.getSettings?.() ?? {}) as Record<string, unknown>;
+        console.log("📡 Kamera képességek (indítás):", caps);
+        console.log("⚙️ Kamera jelenlegi beállítások:", settings);
+        console.log("📐 Video felbontás:", settings.width, "x", settings.height);
+        toast({
+          title: "Kamera aktív",
+          description: `${settings.width}×${settings.height} • Zoom: ${caps.zoom ? "✓" : "✗"} • Fókusz: ${caps.focusDistance ? "✓" : "✗"} • EV: ${caps.exposureCompensation ? "✓" : "✗"}`,
+        });
+      } else {
+        toast({
+          title: "Kamera aktív",
+          description: `Facing: ${facing === "environment" ? "hátsó" : "első"}`,
+        });
+      }
     } catch (e: unknown) {
       const err = e as Error;
       setError(err.message || "Kamera indítása sikertelen");
@@ -169,49 +209,115 @@ export function CaptureTab({
   }, [stream]);
 
   // Track constraint-ek alkalmazása (ha támogatott)
+  // Ez a függvény a zoom, fókusz, EV és WB állításokat elküldi a kamerának
+  const [constraintStatus, setConstraintStatus] = useState<{
+    zoom: "idle" | "applied" | "failed";
+    focus: "idle" | "applied" | "failed";
+    exposure: "idle" | "applied" | "failed";
+    wb: "idle" | "applied" | "failed";
+  }>({ zoom: "idle", focus: "idle", exposure: "idle", wb: "idle" });
+
   const applyTrackConstraints = useCallback(async () => {
     if (!stream) return;
     const track = stream.getVideoTracks()[0];
     if (!track) return;
 
+    // A capabilities objektumban a zoom, focusDistance stb. {min, max, step} formátumban jön
     const capabilities = (track.getCapabilities?.() ?? {}) as MediaTrackCapabilities & {
       focusMode?: string[];
       focusDistance?: { min: number; max: number; step: number };
       exposureCompensation?: { min: number; max: number; step: number };
+      exposureMode?: string[];
       zoom?: { min: number; max: number; step: number };
       torch?: boolean;
       whiteBalanceMode?: string[];
       whiteBalanceTemperature?: { min: number; max: number; step: number };
     };
 
-    const constraints: MediaTrackConstraintSet = {};
-
-    if (focusMode === "manual" && capabilities.focusDistance) {
-      constraints.focusMode = "manual";
-      constraints.focusDistance = focusDistance * (capabilities.focusDistance.max || 1);
-    } else {
-      constraints.focusMode = "continuous";
+    // === ZOOM ===
+    // A zoom értékeket 1.0-tól a capabilities.zoom.max-ig küldjük
+    if (capabilities.zoom) {
+      const minZoom = capabilities.zoom.min || 100; // A MediaTrackZoom hyptypically 100-tól indul (Chrome)
+      const maxZoom = capabilities.zoom.max;
+      // A UI zoom 1.0-8.0, de a track zoom 100-maxZoom tartomány
+      // Lineáris skálázás: uiZoom 1.0 = minZoom, uiZoom 8.0 = maxZoom
+      const uiZoomMin = 1.0;
+      const uiZoomMax = 8.0;
+      const scaledZoom = Math.round(
+        minZoom + ((zoom - uiZoomMin) / (uiZoomMax - uiZoomMin)) * (maxZoom - minZoom)
+      );
+      try {
+        await track.applyConstraints({
+          advanced: [{ zoom: scaledZoom } as MediaTrackConstraintSet],
+        });
+        setConstraintStatus((s) => ({ ...s, zoom: "applied" }));
+      } catch (e) {
+        console.warn("Zoom alkalmazása sikertelen:", e);
+        setConstraintStatus((s) => ({ ...s, zoom: "failed" }));
+      }
     }
 
-    if (exposureComp !== 0 && capabilities.exposureCompensation) {
-      constraints.exposureCompensation = exposureComp;
+    // === FÓKUSZ ===
+    if (capabilities.focusMode && capabilities.focusDistance) {
+      const constraints: MediaTrackConstraintSet = {};
+      if (focusMode === "manual") {
+        constraints.focusMode = "manual";
+        // A fókusz távolság 0-1 között van az UI-ban, de a track 0-max között
+        const maxDist = capabilities.focusDistance.max || 1;
+        constraints.focusDistance = focusDistance * maxDist;
+      } else {
+        constraints.focusMode = "continuous";
+      }
+      try {
+        await track.applyConstraints({ advanced: [constraints] });
+        setConstraintStatus((s) => ({ ...s, focus: "applied" }));
+      } catch (e) {
+        console.warn("Fókusz alkalmazása sikertelen:", e);
+        setConstraintStatus((s) => ({ ...s, focus: "failed" }));
+      }
     }
 
-    if (zoom > 1 && capabilities.zoom) {
-      constraints.zoom = zoom * (capabilities.zoom.max || 1);
+    // === EXPOZÍCIÓ KOMPENZÁCIÓ ===
+    if (capabilities.exposureCompensation) {
+      try {
+        await track.applyConstraints({
+          advanced: [
+            { exposureCompensation } as MediaTrackConstraintSet,
+          ],
+        });
+        setConstraintStatus((s) => ({ ...s, exposure: "applied" }));
+      } catch (e) {
+        console.warn("Expozíció kompenzáció sikertelen:", e);
+        setConstraintStatus((s) => ({ ...s, exposure: "failed" }));
+      }
     }
 
+    // === VAKU ===
     if (capabilities.torch !== undefined) {
-      constraints.torch = torchOn;
+      try {
+        await track.applyConstraints({
+          advanced: [{ torch: torchOn } as MediaTrackConstraintSet],
+        });
+      } catch (e) {
+        console.warn("Vaku kapcsolás sikertelen:", e);
+      }
     }
 
-    try {
-      await track.applyConstraints({ advanced: [constraints] });
-    } catch (e) {
-      // Néhány constraint nem támogatott, ne dobjunk hibát
-      console.warn("Constraint alkalmazása sikertelen", e);
+    // === FEHÉRMÉRLEG ===
+    if (capabilities.whiteBalanceMode) {
+      try {
+        const wbConstraint: MediaTrackConstraintSet =
+          wbMode === "auto"
+            ? { whiteBalanceMode: "continuous" }
+            : { whiteBalanceMode: "manual" };
+        await track.applyConstraints({ advanced: [wbConstraint] });
+        setConstraintStatus((s) => ({ ...s, wb: "applied" }));
+      } catch (e) {
+        console.warn("Fehérmérleg sikertelen:", e);
+        setConstraintStatus((s) => ({ ...s, wb: "failed" }));
+      }
     }
-  }, [stream, focusMode, focusDistance, exposureComp, zoom, torchOn]);
+  }, [stream, focusMode, focusDistance, exposureComp, zoom, torchOn, wbMode]);
 
   useEffect(() => {
     applyTrackConstraints();
@@ -371,10 +477,26 @@ export function CaptureTab({
         // === EFFEKTV HOSSZÚ EXPOZÍCIÓ ===
         // A webböngészők nem tudnak valódi hosszú expozíciót, ezért
         // több képkockát készítünk a video stream-ből és átlagoljuk.
-        // A képkockák száma a kívánt expozíciótól függ (max 30 frame)
-        const targetFrames = Math.min(30, Math.max(5, Math.round(exposureTime / 0.5)));
-        // Idő a képkockák között (ms) - 50ms alapból, de lehet gyorsabb
-        const frameDelayMs = 80;
+        //
+        // A képkockák számát úgy választjuk meg, hogy a teljes gyűjtési idő
+        // megközelítse a beállított expozíciós időt.
+        // - A video stream általában 30 FPS, de a drawImage + getImageData ~80-100ms
+        // - Ezért ha pl. 17.7s expozíciót kérünk, kb. 17.7 / 0.1 = 177 frame lenne
+        // - Ezt korlátozzuk max 60 frame-re (több felesleges lenne, csak lassítja)
+        // - A frameDelay-t 100ms-ra állítjuk, így 60 frame = 6s gyűjtési idő
+        // - Ha a beállított expozíció > 6s, akkor is 60 frame-t gyűjtünk
+        const frameDelayMs = 100; // 0.1s képkockák között
+        const maxFrames = 60;
+        const minFrames = 5;
+        const targetFrames = Math.min(
+          maxFrames,
+          Math.max(minFrames, Math.round(exposureTime * 1000 / frameDelayMs))
+        );
+        const totalCaptureTimeMs = targetFrames * frameDelayMs;
+        console.log(
+          `📸 Effektív hosszú expozíció: ${exposureTime}s beállított → ` +
+          `${targetFrames} képkocka × ${frameDelayMs}ms = ${(totalCaptureTimeMs / 1000).toFixed(1)}s tényleges gyűjtés`
+        );
 
         // Első képkocka a referenciához - méretekből
         const firstCanvas = document.createElement("canvas");
@@ -395,6 +517,9 @@ export function CaptureTab({
         setCaptureProgress(Math.round((framesCaptured / targetFrames) * 100));
 
         // További képkockák gyűjtése
+        // Megjegyzés: ez a módszer csak statikus vagy lassan változó jeleneteknél jó,
+        // asztrofotózásnál a csillagok elmozdulása miatt a stackelés előtt
+        // alignment szükséges (ez a Feldolgozás tab-on történik)
         for (let f = 1; f < targetFrames; f++) {
           await new Promise((resolve) => setTimeout(resolve, frameDelayMs));
           // Ellenőrizzük, hogy a video még mindig aktív
@@ -414,6 +539,7 @@ export function CaptureTab({
           avgData[i] = Math.round(accumulator[i] / framesCaptured);
         }
         finalImageData = new ImageData(avgData, actualWidth, actualHeight);
+        console.log(`✓ Effektív expozíció kész: ${framesCaptured} frame átlagolva, ${(totalCaptureTimeMs / 1000).toFixed(1)}s`);
       } else {
         // === RÖVID EXPOZÍCIÓ - egyetlen képkocka ===
         // Próbáljuk meg az ImageCapture API-t használni a teljes szenzor felbontásért
@@ -702,31 +828,49 @@ export function CaptureTab({
   );
 
   // Aktív track képességei (capabilities)
-  const [capabilities, setCapabilities] = useState<
-    Partial<{
-      focusDistance: boolean;
-      exposureCompensation: boolean;
-      zoom: boolean;
-      torch: boolean;
-      whiteBalanceMode: boolean;
-    }>
-  >({});
+  // Eszköz képességek - tartományokkal együtt tároljuk
+  const [capabilities, setCapabilities] = useState<{
+    focusDistance: boolean;
+    focusDistanceRange?: { min: number; max: number; step: number };
+    exposureCompensation: boolean;
+    exposureCompensationRange?: { min: number; max: number; step: number };
+    zoom: boolean;
+    zoomRange?: { min: number; max: number; step: number };
+    torch: boolean;
+    whiteBalanceMode: boolean;
+    rawCapabilities?: Record<string, unknown>;
+  }>({ focusDistance: false, exposureCompensation: false, zoom: false, torch: false, whiteBalanceMode: false });
 
   useEffect(() => {
     if (!stream) {
-      setCapabilities({});
+      setCapabilities({ focusDistance: false, exposureCompensation: false, zoom: false, torch: false, whiteBalanceMode: false });
       return;
     }
     const track = stream.getVideoTracks()[0];
     if (!track) return;
-    const caps = (track.getCapabilities?.() ?? {}) as Record<string, unknown>;
+    const caps = (track.getCapabilities?.() ?? {}) as Record<string, unknown> & {
+      focusDistance?: { min: number; max: number; step: number };
+      exposureCompensation?: { min: number; max: number; step: number };
+      zoom?: { min: number; max: number; step: number };
+    };
+
     setCapabilities({
       focusDistance: !!caps.focusDistance,
+      focusDistanceRange: caps.focusDistance as { min: number; max: number; step: number } | undefined,
       exposureCompensation: !!caps.exposureCompensation,
+      exposureCompensationRange: caps.exposureCompensation as { min: number; max: number; step: number } | undefined,
       zoom: !!caps.zoom,
+      zoomRange: caps.zoom as { min: number; max: number; step: number } | undefined,
       torch: !!caps.torch,
       whiteBalanceMode: !!caps.whiteBalanceMode,
+      rawCapabilities: caps,
     });
+
+    // Debug: írjuk ki a konzolra, hogy tudd mit támogat a telefonod
+    console.log("📡 Kamera képességek:", caps);
+    console.log("🔍 Zoom támogatott:", !!caps.zoom, caps.zoom ? `(${caps.zoom.min}-${caps.zoom.max})` : "");
+    console.log("🎯 Fókusz támogatott:", !!caps.focusDistance);
+    console.log("☀️ Expozíció kompenzáció:", !!caps.exposureCompensation);
   }, [stream]);
 
   return (
@@ -936,13 +1080,15 @@ export function CaptureTab({
                     <div className="bg-black/60 backdrop-blur rounded-full px-3 py-1.5 border border-white/10 flex items-center gap-2">
                       <button
                         onClick={() => setZoom((z) => Math.max(1, z - 0.2))}
-                        className="text-white hover:text-emerald-300 transition"
+                        className="text-white hover:text-emerald-300 transition disabled:opacity-30"
                         disabled={!capabilities.zoom}
                       >
                         <Minus className="w-4 h-4" />
                       </button>
                       <div className="flex-1 flex items-center gap-2">
-                        <span className="text-[10px] text-slate-400 w-8 font-mono">{zoom.toFixed(1)}x</span>
+                        <span className={`text-[10px] w-10 font-mono ${constraintStatus.zoom === "applied" ? "text-emerald-300" : constraintStatus.zoom === "failed" ? "text-red-400" : "text-slate-400"}`}>
+                          {zoom.toFixed(1)}x
+                        </span>
                         <input
                           type="range"
                           min={1}
@@ -953,20 +1099,29 @@ export function CaptureTab({
                           disabled={!capabilities.zoom}
                           className="flex-1 accent-emerald-500 h-1"
                         />
+                        {capabilities.zoomRange && (
+                          <span className="text-[8px] text-slate-500 font-mono hidden sm:inline">
+                            (max {capabilities.zoomRange.max})
+                          </span>
+                        )}
                       </div>
                       <button
                         onClick={() => setZoom((z) => Math.min(8, z + 0.2))}
-                        className="text-white hover:text-emerald-300 transition"
+                        className="text-white hover:text-emerald-300 transition disabled:opacity-30"
                         disabled={!capabilities.zoom}
                       >
                         <Plus className="w-4 h-4" />
                       </button>
                     </div>
-                    {!capabilities.zoom && (
+                    {!capabilities.zoom ? (
                       <div className="text-[9px] text-amber-300 text-center mt-1 bg-black/60 rounded px-2 py-0.5">
-                        Zoom nem támogatott ezen az eszközen
+                        ⚠ Zoom nem támogatott ezen az eszközen
                       </div>
-                    )}
+                    ) : constraintStatus.zoom === "failed" ? (
+                      <div className="text-[9px] text-red-400 text-center mt-1 bg-black/60 rounded px-2 py-0.5">
+                        ✗ Zoom beállítás sikertelen
+                      </div>
+                    ) : null}
                   </div>
 
                   {/* === ELŐZÁR-IDŐ VISSZASZÁMLÁLÓ === */}
@@ -998,7 +1153,7 @@ export function CaptureTab({
                     <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 backdrop-blur-sm z-40">
                       <div className="text-[10px] uppercase tracking-widest text-emerald-300 mb-2">
                         {settings.exposureSeconds >= 1
-                          ? `Effektív hosszú expozíció (${settings.exposureSeconds}s)`
+                          ? `Effektív hosszú expozíció – ${settings.exposureSeconds}s beállított`
                           : "Kép rögzítése..."}
                       </div>
                       <div className="relative w-20 h-20 mb-4">
@@ -1029,9 +1184,18 @@ export function CaptureTab({
                       </div>
                       {settings.exposureSeconds >= 1 && (
                         <div className="text-xs text-slate-300 max-w-[80%] text-center">
-                          {settings.exposureSeconds}s expozíció →{" "}
-                          {Math.min(30, Math.max(5, Math.round(settings.exposureSeconds / 0.5)))}{" "}
-                          képkocka átlagolása a zaj csökkentéséért
+                          {(() => {
+                            const frameDelayMs = 100;
+                            const targetFrames = Math.min(
+                              60,
+                              Math.max(5, Math.round(settings.exposureSeconds * 1000 / frameDelayMs))
+                            );
+                            const totalMs = targetFrames * frameDelayMs;
+                            return `${targetFrames} képkocka × 100ms = ${(totalMs / 1000).toFixed(1)}s tényleges gyűjtés`;
+                          })()}
+                          <div className="text-[10px] text-slate-400 mt-1">
+                            (Böngésző korlát: max 60 frame, zajcsökkentés átlagolással)
+                          </div>
                         </div>
                       )}
                       <div className="text-[10px] text-amber-300 mt-3">
