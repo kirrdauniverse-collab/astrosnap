@@ -90,11 +90,14 @@ export function CaptureTab({
   const [burstTotal, setBurstTotal] = useState(0);
   const [capturedCount, setCapturedCount] = useState(0);
   const [autoTimer, setAutoTimer] = useState(false);
+  const [countdown, setCountdown] = useState<number | null>(null); // előzár-idő visszaszámláló
+  const [countdownLabel, setCountdownLabel] = useState<string>("");
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const burstIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const { toast } = useToast();
 
   // Kamera indítása
@@ -200,6 +203,9 @@ export function CaptureTab({
       if (burstIntervalRef.current) {
         clearInterval(burstIntervalRef.current);
       }
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+      }
     };
   }, [stream]);
 
@@ -249,6 +255,47 @@ export function CaptureTab({
     return stored;
   }, [settings, target, sky, equipment]);
 
+  // Várakozás előzár-idővel, visszaszámláló UI-jal
+  const waitForPreShutterDelay = useCallback(
+    (label: string): Promise<boolean> => {
+      return new Promise((resolve) => {
+        const delay = settings.timerSeconds ?? 0;
+        if (delay <= 0) {
+          resolve(true);
+          return;
+        }
+        setCountdownLabel(label);
+        setCountdown(delay);
+        let remaining = delay;
+        countdownIntervalRef.current = setInterval(() => {
+          remaining -= 1;
+          if (remaining <= 0) {
+            if (countdownIntervalRef.current) {
+              clearInterval(countdownIntervalRef.current);
+              countdownIntervalRef.current = null;
+            }
+            setCountdown(null);
+            setCountdownLabel("");
+            resolve(true);
+          } else {
+            setCountdown(remaining);
+          }
+        }, 1000);
+      });
+    },
+    [settings.timerSeconds]
+  );
+
+  // Várakozás megszakítása
+  const cancelCountdown = useCallback(() => {
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+    setCountdown(null);
+    setCountdownLabel("");
+  }, []);
+
   // Egyetlen kép készítése
   const handleSingleCapture = useCallback(async () => {
     if (!stream) {
@@ -259,6 +306,10 @@ export function CaptureTab({
       });
       return;
     }
+    // Várjunk előzár-időt, ha be van állítva
+    if (settings.timerSeconds > 0) {
+      await waitForPreShutterDelay("Fotó készítése...");
+    }
     const img = await captureAndStore();
     if (img) {
       setCapturedCount((c) => c + 1);
@@ -268,7 +319,7 @@ export function CaptureTab({
         description: `ISO ${settings.iso} • ${formatExposure(settings.exposureSeconds)}`,
       });
     }
-  }, [stream, captureAndStore, settings, toast, onCaptured]);
+  }, [stream, captureAndStore, settings, toast, onCaptured, waitForPreShutterDelay]);
 
   // Burst sorozat indítása
   const handleStartBurst = useCallback(async () => {
@@ -287,7 +338,12 @@ export function CaptureTab({
     let count = 0;
     const interval = Math.max(500, settings.intervalSeconds * 1000);
 
-    // Első kép azonnal
+    // Előzár-idő az első kép előtt (ha be van állítva)
+    if (settings.timerSeconds > 0) {
+      await waitForPreShutterDelay("Sorozat indul...");
+    }
+
+    // Első kép
     await captureAndStore();
     count++;
     setBurstProgress(count);
@@ -313,19 +369,20 @@ export function CaptureTab({
         });
       }
     }, interval);
-  }, [stream, settings, captureAndStore, onCaptured, toast]);
+  }, [stream, settings, captureAndStore, onCaptured, toast, waitForPreShutterDelay]);
 
   const handleStopBurst = useCallback(() => {
     if (burstIntervalRef.current) {
       clearInterval(burstIntervalRef.current);
       burstIntervalRef.current = null;
     }
+    cancelCountdown();
     setIsBurst(false);
     toast({
       title: "Sorozat leállítva",
       description: `${burstProgress} kép elmentve`,
     });
-  }, [burstProgress, toast]);
+  }, [burstProgress, toast, cancelCountdown]);
 
   // Fájl feltöltése (támogatott alternatíva)
   const handleFileUpload = useCallback(
@@ -495,6 +552,29 @@ export function CaptureTab({
                           }}
                         />
                       </div>
+                    </div>
+                  )}
+
+                  {/* Overlay: előzár-idő visszaszámláló */}
+                  {countdown !== null && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 backdrop-blur-sm">
+                      <div className="text-[10px] uppercase tracking-widest text-amber-300 mb-2">
+                        {countdownLabel || "Várakozás..."}
+                      </div>
+                      <div className="text-8xl font-bold text-white tabular-nums animate-pulse">
+                        {countdown}
+                      </div>
+                      <div className="text-xs text-slate-300 mt-4">
+                        Ne mozgasd a telefont!
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={cancelCountdown}
+                        className="mt-4 border-red-500/30 text-red-300 hover:bg-red-500/10"
+                      >
+                        Mégse
+                      </Button>
                     </div>
                   )}
 

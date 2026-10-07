@@ -1,5 +1,6 @@
 // AstroSnap – beállításszámító motor
 // Célpont + égbolt + eszköz alapján ajánlott beállításokat generál.
+// Figyelembe veszi a 500-szabályt (csillagmozgás) és az előzár-időt is.
 
 import type {
   AstroSettings,
@@ -8,21 +9,27 @@ import type {
   TargetType,
 } from "./types";
 
-// Alapbeállítások célpontonként (sötét égbolt, phone_tripod alapfeltevés)
-const BASE_SETTINGS: Record<TargetType, AstroSettings> = {
+// Alapbeállítások célpontonként (sötét égbolt, phone_tripod, 1x zoom alapfeltevés)
+// focalLengthMm és zoomFactor, trackingEnabled az applyEquipmentAdjustments-ben lesz beállítva
+const BASE_SETTINGS: Record<
+  TargetType,
+  Omit<AstroSettings, "focalLengthMm" | "zoomFactor" | "trackingEnabled" | "maxExposureSeconds">
+> = {
   milky_way: {
     iso: 3200,
-    exposureSeconds: 25,
+    exposureSeconds: 20, // 500-szabály 24mm-nél: 20.8s, kicsit alatta
     aperture: "f/2.8 vagy nagyobb nyílás",
     whiteBalanceK: 4000,
     focusMode: "infinity",
-    burstCount: 15,
+    burstCount: 20,
     intervalSeconds: 2,
     rawRecommended: true,
     stabilization: false,
-    timerSeconds: 5,
+    timerSeconds: 5, // előzár-idő a rezgés elkerülésére
     notes:
-      "500-as szabály: 500 ÷ fókusztávolság = max expozíció másodpercben. Ha lehetséges, használj RAW formátumot és utófeldolgozást.",
+      "500-as szabály: 500 ÷ fókusztávolság = max expozíció másodpercben (csillagmozgás nélkül). " +
+      "Ha lehetséges, használj RAW formátumot és utófeldolgozást. Fix állványon a csillagok elmozdulnak, " +
+      "ezért a stackelés előtt az auto-align funkciót hagyd bekapcsolva.",
   },
   moon: {
     iso: 100,
@@ -48,13 +55,13 @@ const BASE_SETTINGS: Record<TargetType, AstroSettings> = {
     intervalSeconds: 0.2,
     rawRecommended: false,
     stabilization: false,
-    timerSeconds: 0,
+    timerSeconds: 2,
     notes:
       "Bolygókhoz sok rövid képet készíts (videós stackelés). Később a legélesebb 25%-ot stackeld.",
   },
   nebula: {
     iso: 1600,
-    exposureSeconds: 30,
+    exposureSeconds: 20,
     aperture: "f/2.8 vagy távcső f/4-6",
     whiteBalanceK: 3800,
     focusMode: "manual",
@@ -64,11 +71,12 @@ const BASE_SETTINGS: Record<TargetType, AstroSettings> = {
     stabilization: false,
     timerSeconds: 5,
     notes:
-      "A ködök halványak, sok kép és hosszú expozíció kell. Sötét égbolt elengedhetetlen. Távcsővel sokkal jobb eredmény.",
+      "A ködök halványak, sok kép és hosszú expozíció kell. Sötét égbolt elengedhetetlen. " +
+      "Távcsővel sokkal jobb eredmény, de ott már tracking szükséges a 20s feletti expozíciókhoz.",
   },
   galaxy: {
     iso: 1600,
-    exposureSeconds: 60,
+    exposureSeconds: 20,
     aperture: "távcső f/4-6",
     whiteBalanceK: 4200,
     focusMode: "manual",
@@ -78,7 +86,8 @@ const BASE_SETTINGS: Record<TargetType, AstroSettings> = {
     stabilization: false,
     timerSeconds: 5,
     notes:
-      "Galaxisok távcsővel fotózhatók igazán. Ha csak telefonod van, az Andromedát próbáld hosszú expozícióval.",
+      "Galaxisok távcsővel fotózhatók igazán. Tracking nélkül az expozíciót a 500-szabály korlátozza, " +
+      "ezért sok rövid képet stackelj. Motoros követéssel lehet 60s+ expozíciót használni.",
   },
   star_cluster: {
     iso: 800,
@@ -104,9 +113,10 @@ const BASE_SETTINGS: Record<TargetType, AstroSettings> = {
     intervalSeconds: 1,
     rawRecommended: false,
     stabilization: false,
-    timerSeconds: 0,
+    timerSeconds: 0, // csillagcsíkoknál nem zavar a rezgés
     notes:
-      "Folyamatos sorozat, 100+ kép. Később lighten vagy maximum stackelés csinálja a csíkokat.",
+      "Folyamatos sorozat, 100+ kép. Itt szándékosan hosszú expozíciót használunk, hogy a csillagok " +
+      "elmozduljanak és csíkokat hozzanak létre. Később lighten vagy maximum stackelés csinálja a csíkokat.",
   },
   aurora: {
     iso: 2400,
@@ -138,12 +148,44 @@ const BASE_SETTINGS: Record<TargetType, AstroSettings> = {
   },
 };
 
+// Eszköz alapértelmezett fókusztávolságok (FF ekvivalens mm)
+const EQUIPMENT_FOCAL_LENGTH: Record<EquipmentType, number> = {
+  phone_handheld: 24, // telefon fő kamera, széles látószög
+  phone_tripod: 24,
+  phone_telescope_afocal: 1000, // távcső nagyítása miatt
+  phone_telescope_prime: 1000,
+  dslr_tripod: 50, // alap objektív
+  dslr_telescope: 1000,
+};
+
+// Eszköz alapértelmezett követés (tracking)
+const EQUIPMENT_TRACKING: Record<EquipmentType, boolean> = {
+  phone_handheld: false,
+  phone_tripod: false,
+  phone_telescope_afocal: false,
+  phone_telescope_prime: false,
+  dslr_tripod: false,
+  dslr_telescope: false, // lehet true ha star tracker van, de alapból false
+};
+
 // Eszköz-specifikus korrekciók
 function applyEquipmentAdjustments(
-  base: AstroSettings,
+  base: Omit<
+    AstroSettings,
+    "focalLengthMm" | "zoomFactor" | "trackingEnabled" | "maxExposureSeconds"
+  >,
   equipment: EquipmentType
 ): AstroSettings {
-  const adjusted: AstroSettings = { ...base };
+  const adjusted: AstroSettings = {
+    ...base,
+    focalLengthMm: EQUIPMENT_FOCAL_LENGTH[equipment],
+    zoomFactor: 1,
+    trackingEnabled: EQUIPMENT_TRACKING[equipment],
+    maxExposureSeconds: 0, // később kiszámoljuk
+  };
+
+  // maxExposure = 500 / effektív fókusztávolság
+  adjusted.maxExposureSeconds = computeMaxExposure(adjusted);
 
   switch (equipment) {
     case "phone_handheld":
@@ -154,6 +196,7 @@ function applyEquipmentAdjustments(
       adjusted.iso = Math.min(adjusted.iso * 1.5, 6400);
       adjusted.stabilization = true;
       adjusted.burstCount = Math.max(adjusted.burstCount, 20);
+      adjusted.timerSeconds = 2; // kézből rövidebb is elég
       adjusted.notes =
         (adjusted.notes ? adjusted.notes + " " : "") +
         "Kézből tartva az ISO-t megemeltük és a stabilizációt bekapcsoltuk. " +
@@ -161,10 +204,11 @@ function applyEquipmentAdjustments(
       break;
 
     case "phone_tripod":
-      // Maradnak az alapbeállítások, kis emlékeztető
+      // Maradnak az alapbeállítások, de 500-szabály alkalmazása
       adjusted.notes =
         (adjusted.notes ? adjusted.notes + " " : "") +
-        "Állványon hosszabb expozíció is biztonságos. Használj 2s önkioldót a rázkódás elkerülésére.";
+        "Fix állványon a telefon rezgését a 2-5s előzár-idő (önkioldó) csillapítja. " +
+        "Használd az időzítőt, ne nyomd meg közvetlenül az exponálót!";
       break;
 
     case "phone_telescope_afocal":
@@ -175,18 +219,20 @@ function applyEquipmentAdjustments(
       adjusted.focusMode = "manual";
       adjusted.notes =
         "Afokális módban a telefont az okulár mögé kell illeszteni. " +
-        "Kézi élesség szükséges. Sok képet készíts, a stackelés javítja az élességet.";
+        "Kézi élesség szükséges. Nagyon hosszú fókusz → nagyon rövid max expozíció (500-szabály), " +
+        "készíts sok képet és stackelj.";
       break;
 
     case "phone_telescope_prime":
       // Primer fókusz - nagyon hosszú fókusz, halvány
-      adjusted.exposureSeconds = Math.max(adjusted.exposureSeconds, 30);
+      adjusted.exposureSeconds = Math.max(adjusted.exposureSeconds, 5);
       adjusted.iso = Math.min(adjusted.iso * 1.2, 6400);
       adjusted.burstCount = Math.max(adjusted.burstCount, 30);
       adjusted.focusMode = "manual";
       adjusted.notes =
         "Primer fókuszban a telefon közvetlenül a távcső fókuszpontjában van. " +
-        "Nagyon precíz fókuszálás szükséges. Készíts sorozatot és stackelj.";
+        "Nagyon precíz fókuszálás szükséges. A 500-szabály nagyon rövid expozíciót ír elő - " +
+        "tracking nélkül csak másodpercekig fotózható, de sok kép stackelésével kompenzálható.";
       break;
 
     case "dslr_tripod":
@@ -203,11 +249,24 @@ function applyEquipmentAdjustments(
       adjusted.rawRecommended = true;
       adjusted.burstCount = Math.max(adjusted.burstCount, 30);
       adjusted.notes =
-        "DSLR + távcső kombó. Használj guide-ot ha lehetséges, és készíts sötét/flat frame-eket a zaj redukcióhoz.";
+        "DSLR + távcső kombó. Ha van motoros követésed (star tracker), kapcsold be a " +
+        "tracking opciót a beállításokban - így hosszabb expozíció is használható. " +
+        "Készíts sötét/flat frame-eket a zaj redukcióhoz.";
       break;
   }
 
   return adjusted;
+}
+
+// 500-szabály: max expozíció csillagmozgás nélkül
+// max_exposure = 500 / effektív_fókusztávolság_mm
+// biztonsági faktor: 0.85 (kicsit konzervatívabb)
+function computeMaxExposure(settings: AstroSettings): number {
+  if (settings.trackingEnabled) return 600; // tracking-gel nincs limit (gyakorlatilag)
+  const effectiveFocalLength = settings.focalLengthMm * settings.zoomFactor;
+  const ruleMax = 500 / effectiveFocalLength;
+  // 0.85 biztonsági faktor, hogy biztosan ne legyen látható elmozdulás
+  return Math.max(0.1, ruleMax * 0.85);
 }
 
 // Égbolt körülmények alapján történő korrekció
@@ -234,10 +293,7 @@ function applySkyAdjustments(
       (adjusted.notes ? adjusted.notes + " " : "") +
       "Mérsékelt fényszennyezés. Rövidebb expozíció + stackelés javasolt.";
   } else if (sky.bortle <= 2) {
-    // Kiváló sötét égbolt - hosszabb expozíció engedhető meg
-    if (adjusted.exposureSeconds < 30) {
-      adjusted.exposureSeconds = Math.min(adjusted.exposureSeconds * 1.3, 60);
-    }
+    // Kiváló sötét égbolt - hosszabb expozíció engedhető meg (de 500-szabály továbbra is érvényes)
     adjusted.notes =
       (adjusted.notes ? adjusted.notes + " " : "") +
       "Kiváló sötét égbolt! Hosszabb expozíció és alacsonyabb ISO is használható a jobb jel/zaj viszonyhoz.";
@@ -279,6 +335,26 @@ function applySkyAdjustments(
   return adjusted;
 }
 
+// 500-szabály alkalmazása: ha az expozíció túllépi a max-ot és nincs tracking
+function apply500Rule(settings: AstroSettings): AstroSettings {
+  if (settings.trackingEnabled) return settings;
+
+  const maxExp = computeMaxExposure(settings);
+  if (settings.exposureSeconds > maxExp) {
+    const originalExp = settings.exposureSeconds;
+    // Kerekítsük lefelé 0.1s pontossággal
+    settings.exposureSeconds = Math.floor(maxExp * 10) / 10;
+    settings.notes =
+      (settings.notes ? settings.notes + " " : "") +
+      `⚠ 500-szabály: ${settings.focalLengthMm * settings.zoomFactor}mm fókusznál ` +
+      `max ${maxExp.toFixed(1)}s expozíció ajánlott (csillagmozgás miatt). ` +
+      `Eredeti ajánlás ${formatExp(originalExp)} volt, csökkentettük. ` +
+      `Zoom növelésével ez az érték tovább csökken. ` +
+      `Tracking (motoros követés) esetén ez a korlát nem érvényes.`;
+  }
+  return settings;
+}
+
 // Fő számító függvény
 export function computeSettings(
   target: TargetType,
@@ -287,8 +363,37 @@ export function computeSettings(
 ): AstroSettings {
   const base = { ...BASE_SETTINGS[target] };
   const withEquipment = applyEquipmentAdjustments(base, equipment);
-  const finalSettings = applySkyAdjustments(withEquipment, sky);
+  const withSky = applySkyAdjustments(withEquipment, sky);
+  const finalSettings = apply500Rule(withSky);
   return finalSettings;
+}
+
+// Újraszámolja a maxExposure-t és alkalmazza a 500-szabályt,
+// ha a felhasználó megváltoztatta a zoom-ot vagy a tracking-et
+export function recalculateWithZoom(
+  settings: AstroSettings,
+  zoomFactor: number,
+  trackingEnabled: boolean
+): AstroSettings {
+  const updated: AstroSettings = {
+    ...settings,
+    zoomFactor,
+    trackingEnabled,
+    focalLengthMm: settings.focalLengthMm, // marad az eredeti
+  };
+  updated.maxExposureSeconds = computeMaxExposure(updated);
+
+  // Ha tracking be van kapcsolva: ne korlátozzuk
+  if (trackingEnabled) {
+    // nem módosítjuk az expozíciót
+    return updated;
+  }
+
+  // Ha az expozíció túllépi az új max-ot, csökkentsük
+  if (updated.exposureSeconds > updated.maxExposureSeconds) {
+    updated.exposureSeconds = Math.floor(updated.maxExposureSeconds * 10) / 10;
+  }
+  return updated;
 }
 
 // Segédfüggvény: expozíció formázása
@@ -301,6 +406,11 @@ export function formatExposure(seconds: number): string {
     return `${seconds.toFixed(1)} s`;
   }
   return `${Math.round(seconds)} s`;
+}
+
+// Rövidített formázás a notes-hoz
+function formatExp(seconds: number): string {
+  return formatExposure(seconds);
 }
 
 // ISO kategória emberi olvasható formában
@@ -319,4 +429,9 @@ export function describeWhiteBalance(k: number): string {
   if (k < 5500) return "Semleges napfény";
   if (k < 6500) return "Meleg napfény";
   return "Meleg (gyűjtő fényforrásokhoz)";
+}
+
+// Effektív fókusztávolság (zoom-al együtt)
+export function effectiveFocalLength(settings: AstroSettings): number {
+  return settings.focalLengthMm * settings.zoomFactor;
 }

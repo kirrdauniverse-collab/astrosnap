@@ -49,6 +49,7 @@ import {
   Thermometer,
   Focus,
   Camera,
+  Timer,
 } from "lucide-react";
 
 interface SetupTabProps {
@@ -401,6 +402,136 @@ export function SetupTab(props: SetupTabProps) {
                 step={100}
                 className="py-1"
               />
+            </div>
+
+            {/* 500-szabály panel: zoom + tracking + max exposure */}
+            <div className="p-3 rounded-lg bg-sky-500/5 border border-sky-500/20 space-y-3">
+              <div className="flex items-center gap-1.5 text-xs font-medium text-sky-300">
+                <Telescope className="w-3.5 h-3.5" />
+                500-szabály (csillagmozgás)
+              </div>
+
+              {/* Zoom beállítás */}
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <Label className="text-[11px] text-slate-300">Zoom szorzó</Label>
+                  <Badge variant="outline" className="text-[10px] font-mono text-sky-300 border-sky-500/30">
+                    {settings.zoomFactor.toFixed(1)}x
+                  </Badge>
+                </div>
+                <Slider
+                  value={[Math.round(settings.zoomFactor * 10)]}
+                  onValueChange={(v) => {
+                    const newZoom = v[0] / 10;
+                    const newFocal = settings.focalLengthMm * newZoom;
+                    const newMax = settings.trackingEnabled
+                      ? 600
+                      : Math.max(0.1, (500 / newFocal) * 0.85);
+                    let newExp = settings.exposureSeconds;
+                    let newNotes = settings.notes;
+                    if (!settings.trackingEnabled && newExp > newMax) {
+                      newExp = Math.floor(newMax * 10) / 10;
+                      newNotes = newNotes.replace(
+                        /⚠ 500-szabály:[^]*?(?=\s*$|\s*Tracking)/,
+                        ""
+                      ).trim();
+                      newNotes =
+                        (newNotes ? newNotes + " " : "") +
+                        `⚠ 500-szabály: ${newFocal.toFixed(0)}mm fókusznál ` +
+                        `max ${newMax.toFixed(1)}s expozíció ajánlott. Csökkentettük az expozíciót.`;
+                    }
+                    onSettingsChange({
+                      ...settings,
+                      zoomFactor: newZoom,
+                      maxExposureSeconds: newMax,
+                      exposureSeconds: newExp,
+                      notes: newNotes,
+                    });
+                  }}
+                  min={1}
+                  max={80}
+                  step={1}
+                  className="py-1"
+                />
+              </div>
+
+              {/* Effektív fókusz + max expozíció */}
+              <div className="grid grid-cols-2 gap-2 text-[10px]">
+                <div className="p-2 rounded-md bg-[#080d1a] border border-white/5">
+                  <div className="text-slate-400 mb-0.5">Effektív fókusz</div>
+                  <div className="font-mono font-bold text-sky-200">
+                    {(settings.focalLengthMm * settings.zoomFactor).toFixed(0)} mm
+                  </div>
+                </div>
+                <div className="p-2 rounded-md bg-[#080d1a] border border-white/5">
+                  <div className="text-slate-400 mb-0.5">
+                    Max expozíció {settings.trackingEnabled ? "(tracking)" : "(500-szabály)"}
+                  </div>
+                  <div className="font-mono font-bold text-sky-200">
+                    {settings.trackingEnabled
+                      ? "nincs limit"
+                      : `${settings.maxExposureSeconds.toFixed(1)}s`}
+                  </div>
+                </div>
+              </div>
+
+              {/* Tracking kapcsoló */}
+              <div className="flex items-center justify-between p-2 rounded-md bg-[#080d1a] border border-white/5">
+                <div className="min-w-0">
+                  <Label className="text-[11px] text-slate-300">
+                    Motoros követés (tracking)
+                  </Label>
+                  <div className="text-[9px] text-slate-500">
+                    Equatoriális állvány / star tracker
+                  </div>
+                </div>
+                <Switch
+                  checked={settings.trackingEnabled}
+                  onCheckedChange={(v) => {
+                    const newMax = v ? 600 : Math.max(0.1, (500 / (settings.focalLengthMm * settings.zoomFactor)) * 0.85);
+                    onSettingsChange({
+                      ...settings,
+                      trackingEnabled: v,
+                      maxExposureSeconds: newMax,
+                    });
+                  }}
+                />
+              </div>
+
+              {!settings.trackingEnabled &&
+                settings.exposureSeconds >= settings.maxExposureSeconds && (
+                  <div className="text-[10px] text-amber-300 p-2 rounded-md bg-amber-500/5 border border-amber-500/20">
+                    ⚠ Az expozíció elérte a 500-szabály maximumot. Ha növeled, a csillagok
+                    elmozdulnak és csíkokat hoznak létre.
+                  </div>
+                )}
+            </div>
+
+            {/* Előzár-idő (pre-shutter delay) */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <Label className="text-xs flex items-center gap-1">
+                  <Timer className="w-3 h-3" />
+                  Előzár-idő (önkioldó)
+                </Label>
+                <Badge variant="outline" className="text-[10px] font-mono">
+                  {settings.timerSeconds}s
+                </Badge>
+              </div>
+              <Slider
+                value={[settings.timerSeconds]}
+                onValueChange={(v) =>
+                  onSettingsChange({ ...settings, timerSeconds: v[0] })
+                }
+                min={0}
+                max={15}
+                step={1}
+                className="py-1"
+              />
+              <div className="text-[10px] text-slate-500">
+                Késleltetés az exponáló megnyomása után, hogy a telefon rezgése
+                megszűnjön. Fix állványon ajánlott 2-5s.
+              </div>
             </div>
 
             <Button

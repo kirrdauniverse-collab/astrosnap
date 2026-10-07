@@ -47,6 +47,23 @@ export default function AstroApp() {
     setManualSettings(s);
   }, []);
 
+  // Ha a target, equipment vagy sky megváltozik, automatikusan újraszámolunk
+  // (töröljük a manuális beállításokat, hacsak nem kézzel felülírt értékek)
+  const handleTargetChange = useCallback((t: TargetType) => {
+    setTarget(t);
+    setManualSettings(null);
+  }, []);
+
+  const handleEquipmentChange = useCallback((e: EquipmentType) => {
+    setEquipment(e);
+    setManualSettings(null);
+  }, []);
+
+  const handleSkyChange = useCallback((s: SkyConditions) => {
+    setSky(s);
+    setManualSettings(null);
+  }, []);
+
   const handleAutoRecalculate = useCallback(() => {
     setManualSettings(null);
     setRefreshKey((k) => k + 1);
@@ -139,9 +156,9 @@ export default function AstroApp() {
               sky={sky}
               settings={activeSettings}
               isManual={manualSettings !== null}
-              onTargetChange={setTarget}
-              onEquipmentChange={setEquipment}
-              onSkyChange={setSky}
+              onTargetChange={handleTargetChange}
+              onEquipmentChange={handleEquipmentChange}
+              onSkyChange={handleSkyChange}
               onSettingsChange={handleSettingsChange}
               onAutoRecalculate={handleAutoRecalculate}
             />

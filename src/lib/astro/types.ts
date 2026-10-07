@@ -41,8 +41,13 @@ export interface AstroSettings {
   intervalSeconds: number; // képek közötti szünet
   rawRecommended: boolean;
   stabilization: boolean;
-  timerSeconds: number; // önkioldó
+  timerSeconds: number; // önkioldó / előzár-idő (késleltetés exponáló nyomása után)
   notes: string;
+  // 500-szabályhoz:
+  focalLengthMm: number; // effektív fókusztávolság mm-ben (FF ekvivalens)
+  zoomFactor: number; // 1, 2, 3, 5, ... (telefon zoom szorzó)
+  trackingEnabled: boolean; // van-e motoros követés (equatoriális állvány)
+  maxExposureSeconds: number; // 500-szabály alapján max expozíció csillagmozgás nélkül
 }
 
 // Kalibrációs frame típusok
