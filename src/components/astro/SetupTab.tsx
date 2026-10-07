@@ -489,10 +489,38 @@ export function SetupTab(props: SetupTabProps) {
                   checked={settings.trackingEnabled}
                   onCheckedChange={(v) => {
                     const newMax = v ? 600 : Math.max(0.1, (500 / (settings.focalLengthMm * settings.zoomFactor)) * 0.85);
+                    let newExp = settings.exposureSeconds;
+                    let newNotes = settings.notes;
+                    if (v) {
+                      // Tracking bekapcsolása: visszaállítjuk az expozíciót egy ésszerűbb értékre
+                      // Célpontspecifikus alap expozíció: hosszabb célpontoknál 30-60s
+                      if (newExp < 30) {
+                        // A korábban csökkentett értéket felemeljük
+                        newExp = Math.min(60, Math.max(30, newExp * 2));
+                      }
+                      // Töröljük a 500-szabály figyelmeztetést a notes-ból
+                      newNotes = newNotes.replace(/⚠ 500-szabály:[^]*?(?=\.|$)/g, "").trim();
+                      newNotes = newNotes.replace(/\s+/g, " ");
+                      if (!newNotes.includes("Tracking aktív")) {
+                        newNotes = (newNotes ? newNotes + " " : "") +
+                          "✓ Tracking aktív - a 500-szabály korlát nem érvényes, " +
+                          "hosszabb expozíció is használható. ISO-t érdemes csökkenteni a túlzsír elkerülésére.";
+                      }
+                    } else {
+                      // Tracking kikapcsolása: alkalmazzuk a 500-szabályt
+                      if (newExp > newMax) {
+                        newExp = Math.floor(newMax * 10) / 10;
+                        const eff = settings.focalLengthMm * settings.zoomFactor;
+                        newNotes = (newNotes ? newNotes + " " : "") +
+                          `⚠ 500-szabály: ${eff.toFixed(0)}mm fókusznál max ${newMax.toFixed(1)}s expozíció ajánlott. Csökkentettük az expozíciót.`;
+                      }
+                    }
                     onSettingsChange({
                       ...settings,
                       trackingEnabled: v,
                       maxExposureSeconds: newMax,
+                      exposureSeconds: newExp,
+                      notes: newNotes,
                     });
                   }}
                 />
