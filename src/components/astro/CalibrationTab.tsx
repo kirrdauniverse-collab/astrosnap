@@ -295,49 +295,128 @@ export function CalibrationTab({ settings, onCaptured }: CalibrationTabProps) {
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const files = e.target.files;
       if (!files || files.length === 0) return;
+
+      let successCount = 0;
+      let failedCount = 0;
+
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         const blob = file;
+        const fileName = file.name.toLowerCase();
+
+        // RAW fájlok ellenőrzése
+        const rawExtensions = ['.dng', '.raw', '.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.pef', '.srw'];
+        const isRaw = rawExtensions.some(ext => fileName.endsWith(ext));
+
         try {
-          const url = URL.createObjectURL(blob);
-          const img = new Image();
-          await new Promise((res, rej) => {
-            img.onload = res;
-            img.onerror = rej;
-            img.src = url;
-          });
-          const data = imageToImageData(img, 4096);
-          const thumbnail = await imageDataToThumbnail(data, 240);
-          const stored: StoredImage = {
-            id: genId(activeType),
-            type: activeType,
-            blob,
-            thumbnail,
-            capturedAt: Date.now() + i,
-            settings: {
-              iso: settings.iso,
-              exposureSeconds: settings.exposureSeconds,
-            },
-            metadata: {
-              width: data.width,
-              height: data.height,
-              iso: settings.iso,
-              exposureSeconds: settings.exposureSeconds,
-              label: `${file.name}`,
-            },
-          };
-          await saveImage(stored);
-          URL.revokeObjectURL(url);
+          if (isRaw) {
+            // RAW fájlok - placeholder thumbnail
+            const placeholderCanvas = document.createElement("canvas");
+            placeholderCanvas.width = 400;
+            placeholderCanvas.height = 400;
+            const ctx = placeholderCanvas.getContext("2d")!;
+            ctx.fillStyle = "#1a1a2e";
+            ctx.fillRect(0, 0, 400, 400);
+            ctx.fillStyle = "#ec4899";
+            ctx.font = "bold 24px monospace";
+            ctx.textAlign = "center";
+            ctx.fillText("RAW", 200, 180);
+            ctx.fillStyle = "#94a3b8";
+            ctx.font = "12px sans-serif";
+            ctx.fillText(fileName.substring(0, 30), 200, 220);
+            const placeholderBlob = await new Promise<Blob>((resolve, reject) => {
+              placeholderCanvas.toBlob((b) => b ? resolve(b) : reject(new Error("toBlob failed")), "image/jpeg", 0.7);
+            });
+
+            const stored: StoredImage = {
+              id: genId(activeType),
+              type: activeType,
+              blob,
+              thumbnail: placeholderBlob,
+              capturedAt: Date.now() + i,
+              settings: {
+                iso: settings.iso,
+                exposureSeconds: settings.exposureSeconds,
+              },
+              metadata: {
+                width: 0,
+                height: 0,
+                iso: settings.iso,
+                exposureSeconds: settings.exposureSeconds,
+                label: `${file.name} (RAW)`,
+              },
+            };
+            await saveImage(stored);
+            successCount++;
+          } else {
+            // Normál kép - createImageBitmap a teljes felbontásért
+            const bitmap = await createImageBitmap(blob, {
+              imageOrientation: "from-image",
+            });
+            const w = bitmap.width;
+            const h = bitmap.height;
+
+            const canvas = document.createElement("canvas");
+            const maxDim = 4096;
+            const scale = Math.min(1, maxDim / Math.max(w, h));
+            const finalW = Math.round(w * scale);
+            const finalH = Math.round(h * scale);
+            canvas.width = finalW;
+            canvas.height = finalH;
+            const ctx = canvas.getContext("2d", { willReadFrequently: true })!;
+            ctx.drawImage(bitmap, 0, 0, finalW, finalH);
+            const data = ctx.getImageData(0, 0, finalW, finalH);
+
+            const thumbnail = await imageDataToThumbnail(data, 400);
+
+            bitmap.close();
+
+            const stored: StoredImage = {
+              id: genId(activeType),
+              type: activeType,
+              blob,
+              thumbnail,
+              capturedAt: Date.now() + i,
+              settings: {
+                iso: settings.iso,
+                exposureSeconds: settings.exposureSeconds,
+              },
+              metadata: {
+                width: w,
+                height: h,
+                iso: settings.iso,
+                exposureSeconds: settings.exposureSeconds,
+                label: `${file.name} (${w}×${h})`,
+              },
+            };
+            await saveImage(stored);
+            successCount++;
+          }
         } catch (err) {
-          console.error(err);
+          console.error(`Hiba: ${file.name}`, err);
+          failedCount++;
         }
       }
       onCaptured();
       refreshFrames();
-      toast({
-        title: "Képek betöltve",
-        description: `${files.length} ${CALIBRATION_INFO[activeType].label} mentve`,
-      });
+
+      if (failedCount > 0 && successCount > 0) {
+        toast({
+          title: "Képek betöltve (részben)",
+          description: `${successCount} sikerült, ${failedCount} sikertelen`,
+        });
+      } else if (failedCount > 0) {
+        toast({
+          title: "Sikertelen",
+          description: `${failedCount} képet nem sikerült betölteni`,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Képek betöltve",
+          description: `${successCount} ${CALIBRATION_INFO[activeType].label} mentve`,
+        });
+      }
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
       }
@@ -504,7 +583,7 @@ export function CalibrationTab({ settings, onCaptured }: CalibrationTabProps) {
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept="image/*"
+                    accept="image/*,.dng,.raw,.cr2,.cr3,.nef,.arw,.raf,.orf,.rw2,.pef,.srw,.tiff,.tif,.heic,.heif,.webp,.bmp"
                     multiple
                     onChange={handleFileUpload}
                     className="hidden"

@@ -113,20 +113,30 @@ export function ProcessTab() {
   const biases = allImages.filter((i) => i.type === "bias");
 
   // Választott vagy legutóbbi stackelt eredmény megjelenítése
+  // Csak a stackedImage változásakor fusson, ne a resultImageUrl változásakor
+  // (különben végtelen ciklusba esik az effect)
   useEffect(() => {
     if (!stackedImage) return;
-    if (resultImageUrl) URL.revokeObjectURL(resultImageUrl);
+    // Régi URL felszabadítása ha volt
+    setResultImageUrl((oldUrl) => {
+      if (oldUrl) URL.revokeObjectURL(oldUrl);
+      return ""; // Üres állapot - a kép betöltése folyamatban
+    });
+
+    // Új canvas létrehozása és konvertálás
     const canvas = document.createElement("canvas");
     canvas.width = stackedImage.width;
     canvas.height = stackedImage.height;
     canvas.getContext("2d")!.putImageData(stackedImage, 0, 0);
+
+    // JPEG formátum a gyorsabb betöltésért (PNG túl nagy lenne)
     canvas.toBlob((blob) => {
       if (blob) {
         const url = URL.createObjectURL(blob);
         setResultImageUrl(url);
       }
-    }, "image/png");
-  }, [stackedImage, resultImageUrl]);
+    }, "image/jpeg", 0.92);
+  }, [stackedImage]);
 
   // Színkorrekció élő alkalmazása a stackelt képre
   const applyColorPreview = useCallback(
@@ -180,9 +190,11 @@ export function ProcessTab() {
 
     try {
       const lightImages = lights.filter((l) => selectedLights.has(l.id));
+      // A maxDim-et megnöveljük 4096-ra a jobb részletek érdekében
+      // (korábban 2048 volt, ami túl sok részletet veszített)
       const lightData = await loadStoredImagesAsImageData(
         lightImages,
-        2048,
+        4096,
         (p, msg) => {
           setProgress(p * 0.3);
           setProgressMsg(msg);
@@ -198,21 +210,21 @@ export function ProcessTab() {
         const darkImg = darks.find((d) => d.id === selectedDarkId);
         if (darkImg) {
           const img = await loadImageFromBlob(darkImg.blob);
-          darkData = imageToImageData(img, 2048);
+          darkData = imageToImageData(img, 4096);
         }
       }
       if (stackOptions.useFlatFrame && selectedFlatId) {
         const flatImg = flats.find((d) => d.id === selectedFlatId);
         if (flatImg) {
           const img = await loadImageFromBlob(flatImg.blob);
-          flatData = imageToImageData(img, 2048);
+          flatData = imageToImageData(img, 4096);
         }
       }
       if (stackOptions.useBiasFrame && selectedBiasId) {
         const biasImg = biases.find((d) => d.id === selectedBiasId);
         if (biasImg) {
           const img = await loadImageFromBlob(biasImg.blob);
-          biasData = imageToImageData(img, 2048);
+          biasData = imageToImageData(img, 4096);
         }
       }
 
@@ -869,7 +881,7 @@ function ResultStep(props: ResultStepProps) {
             </div>
           </CardHeader>
           <CardContent>
-            <div className="aspect-video bg-black rounded-lg overflow-hidden border border-white/10 flex items-center justify-center">
+            <div className="aspect-video bg-black rounded-lg overflow-hidden border border-white/10 flex items-center justify-center relative">
               {props.imageUrl ? (
                 <img
                   src={props.imageUrl}
@@ -877,7 +889,13 @@ function ResultStep(props: ResultStepProps) {
                   className="max-w-full max-h-full object-contain"
                 />
               ) : (
-                <div className="text-slate-500 text-sm">Nincs eredmény</div>
+                <div className="flex flex-col items-center text-slate-500 text-sm">
+                  <div className="w-10 h-10 border-2 border-emerald-500/30 border-t-emerald-400 rounded-full animate-spin mb-3"></div>
+                  <div>Eredmény előkészítése...</div>
+                  <div className="text-[10px] text-slate-600 mt-1">
+                    A kép nagy felbontása miatt ez eltarthat pár másodpercig
+                  </div>
+                </div>
               )}
             </div>
 

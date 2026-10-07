@@ -271,6 +271,7 @@ export function applyColorCorrection(
 // ----- Kereszt-korreláció eltolás kereséséhez (egyszerű brute force) -----
 // Két 1-csatornás (gray) Float32Array-on maximalizálja a korrelációt
 // egy megadott eltolási tartományon belül.
+// Minden pixelt nézünk (nem csak minden 2.-at) a pontosabb alignment érdekében.
 function findBestShift(
   a: Float32Array,
   b: Float32Array,
@@ -282,24 +283,49 @@ function findBestShift(
   let bestDy = 0;
   let bestCorr = -Infinity;
 
+  // Normalizált kereszt-korreláció (NCC) - sokkal pontosabb mint az egyszerű szorzat
+  // Először kiszámoljuk az átlagokat
+  let sumA = 0;
+  let sumB = 0;
+  for (let i = 0; i < a.length; i++) {
+    sumA += a[i];
+    sumB += b[i];
+  }
+  const meanA = sumA / a.length;
+  const meanB = sumB / b.length;
+
+  // Szórások
+  let varA = 0;
+  let varB = 0;
+  for (let i = 0; i < a.length; i++) {
+    varA += (a[i] - meanA) * (a[i] - meanA);
+    varB += (b[i] - meanB) * (b[i] - meanB);
+  }
+  const stdA = Math.sqrt(varA / a.length);
+  const stdB = Math.sqrt(varB / b.length);
+  if (stdA === 0 || stdB === 0) {
+    return { dx: 0, dy: 0 };
+  }
+
   for (let dy = -range; dy <= range; dy++) {
     for (let dx = -range; dx <= range; dx++) {
-      let sum = 0;
+      let sumNCC = 0;
       let count = 0;
       const yStart = Math.max(0, -dy);
       const yEnd = Math.min(h, h - dy);
       const xStart = Math.max(0, -dx);
       const xEnd = Math.min(w, w - dx);
-      for (let y = yStart; y < yEnd; y += 2) {
-        // minden 2. sor - gyorsítás
-        for (let x = xStart; x < xEnd; x += 2) {
+      // Minden pixelt nézünk a pontosabb alignment érdekében
+      for (let y = yStart; y < yEnd; y += 1) {
+        for (let x = xStart; x < xEnd; x += 1) {
           const ia = y * w + x;
           const ib = (y + dy) * w + (x + dx);
-          sum += a[ia] * b[ib];
+          // Normalizált kereszt-korreláció
+          sumNCC += ((a[ia] - meanA) / stdA) * ((b[ib] - meanB) / stdB);
           count++;
         }
       }
-      const corr = sum / count;
+      const corr = sumNCC / count;
       if (corr > bestCorr) {
         bestCorr = corr;
         bestDx = dx;
@@ -590,7 +616,8 @@ function resizeImageData(
 
 // ----- Kép lecsökkentése alignment-hez (gyorsabb korreláció) -----
 function downscaleForAlignment(img: ImageData): ImageData {
-  const maxDim = 256;
+  // 512-re növeljük (korábban 256 volt) a pontosabb alignment érdekében
+  const maxDim = 512;
   if (Math.max(img.width, img.height) <= maxDim) return img;
   const scale = maxDim / Math.max(img.width, img.height);
   return resizeImageData(img, Math.round(img.width * scale), Math.round(img.height * scale));
