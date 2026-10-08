@@ -3,13 +3,16 @@
 // A DNG formátum technikailag TIFF alapú, így a UTIF.js könyvtár tudja dekódolni.
 // A legtöbb Android telefon és sok DSLR DNG formátumban menti a RAW fájlokat.
 //
-// Más RAW formátumok (CR2, NEF, ARW stb.) nem támogatottak - ezekhez
-// libraw-wasm kellene (túl nagy ~3MB), így a felhasználónak DNG-vé kell konvertálnia.
+// Megjegyzés: más RAW formátumok (CR2, NEF, ARW stb.) nem támogatottak böngészőben,
+// mert a libraw-wasm könyvtár nem kompatibilis a Next.js 16 Turbopack-kal.
+// A felhasználónak DNG-vé kell konvertálnia az Adobe DNG Converter-rel (ingyenes).
 
 import UTIF from "utif";
 
-// Támogatott RAW formátumok kiterjesztései
-export const SUPPORTED_RAW_EXTENSIONS = [".dng"] as const;
+// Támogatott RAW formátumok kiterjesztései (amiket tudunk dekódolni)
+export const SUPPORTED_RAW_EXTENSIONS = [".dng", ".tiff", ".tif"] as const;
+
+// Nem támogatott RAW formátumok (CR2, NEF, ARW stb.)
 export const UNSUPPORTED_RAW_EXTENSIONS = [
   ".cr2",
   ".cr3",
@@ -28,7 +31,7 @@ export const UNSUPPORTED_RAW_EXTENSIONS = [
  */
 export function isDngFile(fileName: string): boolean {
   const lower = fileName.toLowerCase();
-  return lower.endsWith(".dng");
+  return lower.endsWith(".dng") || lower.endsWith(".tiff") || lower.endsWith(".tif");
 }
 
 /**
@@ -40,16 +43,29 @@ export function isOtherRawFile(fileName: string): boolean {
 }
 
 /**
+ * Ellenőrzi, hogy a fájl bármilyen RAW formátumú-e.
+ */
+export function isRawFile(fileName: string): boolean {
+  return isDngFile(fileName) || isOtherRawFile(fileName);
+}
+
+/**
  * Ellenőrzi, hogy a fájl BMP formátumú-e.
- * A BMP-t a createImageBitmap tudja betölteni natívan, de néha explicit kezelni kell.
  */
 export function isBmpFile(fileName: string): boolean {
   return fileName.toLowerCase().endsWith(".bmp");
 }
 
 /**
- * DNG fájl dekódolása ImageData-vá.
- * A UTIF.js visszaadja a dekódolt pixeleket RGB formátumban.
+ * Ellenőrzi, hogy a fájl TIFF formátumú-e.
+ */
+export function isTiffFile(fileName: string): boolean {
+  const lower = fileName.toLowerCase();
+  return lower.endsWith(".tiff") || lower.endsWith(".tif");
+}
+
+/**
+ * DNG/TIFF fájl dekódolása ImageData-vá a UTIF.js segítségével.
  *
  * @param blob A DNG fájl Blob formájában
  * @param maxDim Maximális dimenzió (ha a kép nagyobb, lekicsinyítjük). Alapértelmezett: 4096
@@ -59,27 +75,18 @@ export async function decodeDngToImageData(
   blob: Blob,
   maxDim = 4096
 ): Promise<ImageData> {
-  // 1. Blob → ArrayBuffer
   const arrayBuffer = await blob.arrayBuffer();
   const bytes = new Uint8Array(arrayBuffer);
 
-  // 2. UTIF.js dekódolás
-  // A UTIF.decode visszaadja az IFD-ket (Image File Directories)
   const ifds = UTIF.decode(bytes);
   if (!ifds || ifds.length === 0) {
     throw new Error("Nem sikerült dekódolni a DNG fájlt - érvénytelen formátum");
   }
 
-  // Az első IFD-t használjuk (a DNG általában egy képet tartalmaz)
   const primaryIfd = ifds[0];
-
-  // Dekódoljuk a képet az IFD-ből (pixelek kinyerése)
   UTIF.decodeImage(bytes, primaryIfd, ifds);
 
-  // A dekódolt kép adatai
   const rgba = UTIF.toRGBA8(primaryIfd);
-
-  // A kép méretei az IFD-ből
   const width = primaryIfd.width;
   const height = primaryIfd.height;
 
@@ -87,18 +94,13 @@ export async function decodeDngToImageData(
     throw new Error("Nem sikerült lekérni a kép méreteit a DNG fájlból");
   }
 
-  // 3. ImageData létrehozása
   const fullData = new Uint8ClampedArray(rgba);
-  let finalW = width;
-  let finalH = height;
 
-  // 4. Ha a kép túl nagy, lekicsinyítjük (maxDim-re)
   if (Math.max(width, height) > maxDim) {
     const scale = maxDim / Math.max(width, height);
-    finalW = Math.round(width * scale);
-    finalH = Math.round(height * scale);
+    const finalW = Math.round(width * scale);
+    const finalH = Math.round(height * scale);
 
-    // Canvas scaling
     const srcCanvas = document.createElement("canvas");
     srcCanvas.width = width;
     srcCanvas.height = height;
@@ -120,14 +122,11 @@ export async function decodeDngToImageData(
 
 /**
  * BMP fájl betöltése ImageData-vá.
- * A legtöbb böngésző a createImageBitmap-pel tudja olvasni a BMP-t,
- * de ha az nem működik, ez a fallback.
  */
 export async function decodeBmpToImageData(
   blob: Blob,
   maxDim = 4096
 ): Promise<ImageData> {
-  // A createImageBitmap tudja a BMP-t natívan
   const bitmap = await createImageBitmap(blob, {
     imageOrientation: "from-image",
   });
@@ -149,18 +148,10 @@ export async function decodeBmpToImageData(
 
 /**
  * Univerzális kép/RAW dekódoló.
- * Automatikusan felismeri a fájl típusát és a megfelelő dekódert használja.
+ * DNG, TIFF, BMP, JPEG, PNG, WEBP, HEIC fájlokat tud dekódolni.
  *
- * Támogatott formátumok:
- *  - DNG (UTIF.js dekóder)
- *  - BMP (createImageBitmap)
- *  - JPEG, PNG, WEBP, GIF (createImageBitmap)
- *  - HEIC/HEIF (Safari támogatja, más böngészők nem)
- *  - TIFF (UTIF.js)
- *
- * Nem támogatott formátumok:
- *  - CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF, SRW, RAW (egyéb RAW)
- *    Ezekhez libraw-wasm kellene (túl nagy ~3MB)
+ * Megjegyzés: CR2, NEF, ARW és egyéb zárt RAW formátumok NEM támogatottak.
+ * Ezeket a felhasználónak DNG-vé kell konvertálnia (Adobe DNG Converter, ingyenes).
  *
  * @param blob A fájl Blob formájában
  * @param fileName A fájl neve (kiterjesztés alapján felismeri a típust)
@@ -174,8 +165,8 @@ export async function decodeImageFile(
 ): Promise<ImageData> {
   const lowerName = fileName.toLowerCase();
 
-  // DNG fájl
-  if (isDngFile(lowerName) || lowerName.endsWith(".tiff") || lowerName.endsWith(".tif")) {
+  // DNG vagy TIFF fájl
+  if (isDngFile(lowerName)) {
     return await decodeDngToImageData(blob, maxDim);
   }
 
@@ -184,7 +175,7 @@ export async function decodeImageFile(
     return await decodeBmpToImageData(blob, maxDim);
   }
 
-  // Egyéb képformátumok (JPEG, PNG, WEBP, HEIC, GIF)
+  // Normál képformátumok (JPEG, PNG, WEBP, HEIC, GIF)
   const bitmap = await createImageBitmap(blob, {
     imageOrientation: "from-image",
   });
@@ -209,12 +200,9 @@ export async function decodeImageFile(
  */
 export function isSupportedFormat(fileName: string): boolean {
   const lower = fileName.toLowerCase();
-  if (isDngFile(lower) || lower.endsWith(".tiff") || lower.endsWith(".tif")) {
-    return true;
-  }
+  if (isDngFile(lower)) return true;
   if (isBmpFile(lower)) return true;
-  if (isOtherRawFile(lower)) return false; // Egyéb RAW nem támogatott
-  // image/* formátumok (jpeg, png, webp, heic stb.) mind támogatottak
+  if (isOtherRawFile(lower)) return false;
   return true;
 }
 
@@ -223,10 +211,13 @@ export function isSupportedFormat(fileName: string): boolean {
  */
 export function getFileFormat(fileName: string): string {
   const lower = fileName.toLowerCase();
-  if (isDngFile(lower)) return "DNG (RAW)";
+  if (lower.endsWith(".dng")) return "DNG (RAW)";
   if (lower.endsWith(".tiff") || lower.endsWith(".tif")) return "TIFF";
   if (isBmpFile(lower)) return "BMP";
-  if (isOtherRawFile(lower)) return `${lower.split(".").pop()?.toUpperCase()} (Nem támogatott RAW)`;
+  if (isOtherRawFile(lower)) {
+    const ext = lower.split(".").pop()?.toUpperCase();
+    return `${ext} (Nem támogatott RAW)`;
+  }
   if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "JPEG";
   if (lower.endsWith(".png")) return "PNG";
   if (lower.endsWith(".webp")) return "WebP";
