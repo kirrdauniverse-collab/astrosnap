@@ -474,120 +474,64 @@ export function CaptureTab({
       let capturedBlob: Blob | null = null;
       let captureFormat = "jpeg";
 
-      // === PRO CAMERA API: ImageCapture.takePhoto PhotoSettings-szel ===
-      // Ez a valódi profi mód - ha a telefon támogatja, ténylegesen
-      // beállítja a hosszú záridőt (exposureTime nanosecumban), ISO-t, fókuszt!
-      // Nem frame átlagolás, hanem a szenzor valódi expozíciója.
-      const { captureWithProSettings, getProCameraCapabilities, secondsToNanoseconds, captureRawDng, applyProCameraSettings, resetToAuto } =
+      // === PRO CAMERA API: grabFrame() a video stream-ből ===
+      // A kulcsfelismerés: takePhoto() IGNOREÁLJA a track exposure beállításait!
+      // De grabFrame() a video stream-ből vesz egy frame-et, ami már be van
+      // állítva manual exposure-re. Ha exposureTime=17.7s, a stream lelassul
+      // és minden frame 17.7s-ig van exponálva. A grabFrame() ezt kapja el!
+      const { captureLongExposureFrame, getProCameraCapabilities, secondsToNanoseconds, resetToAuto } =
         await import("@/lib/processing/proCamera");
 
       let proCaps = null;
       if (stream) {
         try {
           proCaps = await getProCameraCapabilities(stream);
-          console.log("📷 Pro kamera képességek:", proCaps);
-          if (proCaps.exposureTimeSupported) {
-            console.log(`  → Hosszú záridő támogatva: ${proCaps.minExposureTime}ns - ${proCaps.maxExposureTime}ns`);
-            console.log(`  → = ${(proCaps.minExposureTime / 1_000_000_000).toFixed(3)}s - ${(proCaps.maxExposureTime / 1_000_000_000).toFixed(1)}s`);
-          }
-          if (proCaps.isoSupported) {
-            console.log(`  → ISO támogatva: ${proCaps.minIso} - ${proCaps.maxIso}`);
-          }
         } catch (e) {
           console.warn("Pro kamera képességek lekérése sikertelen:", e);
         }
       }
 
-      // Ha a telefon támogatja a hosszú záridőt, használjuk a Pro Camera API-t!
-      // A kulcs: először beállítjuk a track-et exposureMode=manual-ra, exposureTime-tal, ISO-val!
+      // Ha a telefon támogatja a hosszú záridőt, használjuk a grabFrame() módszert!
       if (stream && proCaps && proCaps.exposureTimeSupported) {
         try {
-          setCaptureMethod("Pro Camera API (valódi hosszú záridő)");
+          setCaptureMethod("Pro Camera API (valódi hosszú záridő - grabFrame)");
           const exposureNs = secondsToNanoseconds(exposureTime);
-          console.log(`📸 Pro Camera API: ${exposureTime}s expozíció → ${exposureNs}ns, ISO ${settings.iso}`);
+          console.log(`📸 Pro Camera grabFrame: ${exposureTime}s → ${exposureNs}ns, ISO ${settings.iso}`);
 
-          // 1. Beállítjuk a track-et: exposureMode=manual, exposureTime, iso, focusMode=manual, focusDistance=0
-          const actualSettings = await applyProCameraSettings(stream, {
+          // Progress callback beállítása a hosszú várakozás alatt
+          (window as unknown as { __captureProgress?: (p: number, msg: string) => void }).__captureProgress = (p, msg) => {
+            setCaptureProgress(p);
+            setProgressMsg(msg);
+          };
+
+          // captureLongExposureFrame:
+          // 1. applyProCameraSettings (exposureMode=manual, exposureTime, iso, focus)
+          // 2. Vár exposureTime + 1s (amíg az első hosszú expozíciós frame befejeződik)
+          // 3. grabFrame() - elkapja a hosszú expozíciós képkockát!
+          const frameImageData = await captureLongExposureFrame(stream, {
             exposureTime: exposureNs,
             iso: settings.iso,
             focusMode: settings.focusMode === "infinity" ? "manual" : settings.focusMode,
             focusDistance: 0,
             whiteBalanceMode: settings.whiteBalanceK > 0 ? "manual" : "continuous",
             whiteBalanceTemperature: settings.whiteBalanceK > 0 ? settings.whiteBalanceK : undefined,
-            imageWidth: 4096,
-            imageHeight: 3072,
           });
 
-          // Ha az exposureTime nem egyezik, figyelmeztetünk
-          if (actualSettings.exposureTime !== exposureNs) {
-            console.warn(
-              `⚠ A telefon nem állította be az exposureTime-ot! Kért: ${exposureNs}, kapott: ${actualSettings.exposureTime}`
-            );
-          }
-
-          // 2. takePhoto - VÁRNI FOG az expozíció befejezésére!
-          setCaptureProgress(50);
-          const imageCapture = new ImageCapture(track!);
-          const photoStartTime = performance.now();
-          console.log(`📸 takePhoto() hívása... várjuk a ${exposureTime}s expozíciót`);
-
-          const photoBlob = await imageCapture.takePhoto({
-            imageWidth: 4096,
-            imageHeight: 3072,
-          });
-          const photoDuration = performance.now() - photoStartTime;
-          const photoDurationSec = (photoDuration / 1000).toFixed(2);
-          console.log(`✓ takePhoto() befejezve ${photoDurationSec}s alatt!`);
-
-          // Ha a beállított expozíció > 1s, de a takePhoto < 1s volt,
-          // akkor a telefon nem végezte el a valódi hosszú expozíciót
-          if (exposureTime >= 1 && photoDuration < 1000) {
-            console.warn(
-              `⚠ FIGYELMEZTETÉS: Beállított expozíció ${exposureTime}s, de a takePhoto csak ${photoDurationSec}s-ig tartott! ` +
-                `A telefon NEM végezte el a valódi hosszú expozíciót.`
-            );
-          } else if (exposureTime >= 1) {
-            console.log(`✓ Hosszú expozíció megerősítve: ${photoDurationSec}s (beállított: ${exposureTime}s)`);
-          }
-
-          capturedBlob = photoBlob;
-          // Ellenőrizzük a formátumot
-          if (
-            capturedBlob.type.includes("dng") ||
-            capturedBlob.type.includes("raw") ||
-            capturedBlob.type === "image/tiff"
-          ) {
-            captureFormat = "dng";
-            console.log("✓ DNG (RAW) kimenetet kaptunk!");
-          }
-
-          // Betöltjük a Blob-ot képként
-          const url = URL.createObjectURL(capturedBlob);
-          const img = new Image();
-          await new Promise<void>((resolve, reject) => {
-            img.onload = () => resolve();
-            img.onerror = () => reject(new Error("Kép betöltése sikertelen"));
-            img.src = url;
-          });
-          actualWidth = img.naturalWidth;
-          actualHeight = img.naturalHeight;
-          mainCanvas.width = actualWidth;
-          mainCanvas.height = actualHeight;
-          const ctx = mainCanvas.getContext("2d")!;
-          ctx.drawImage(img, 0, 0, actualWidth, actualHeight);
-          finalImageData = ctx.getImageData(0, 0, actualWidth, actualHeight);
-          URL.revokeObjectURL(url);
+          // A grabFrame() ImageBitmap-et ad vissza, már ImageData-vá alakítva
+          finalImageData = frameImageData;
+          actualWidth = frameImageData.width;
+          actualHeight = frameImageData.height;
+          framesCaptured = 1; // Egyetlen hosszú expozíciós frame!
+          captureFormat = "jpeg"; // grabFrame() JPEG minőség
           setCaptureProgress(100);
 
-          // Visszaállítjuk a kamerát auto módra (capture után)
+          console.log(`✓ Hosszú expozíció kész: ${actualWidth}×${actualHeight}`);
+
+          // Visszaállítjuk a kamerát auto módra
           await resetToAuto(stream);
         } catch (proErr) {
-          console.warn(
-            "Pro Camera API sikertelen, váltás frame átlagolásra:",
-            proErr
-          );
+          console.warn("Pro Camera grabFrame sikertelen, váltás frame átlagolásra:", proErr);
           capturedBlob = null;
-          // Próbáljuk visszaállítani auto módra
           try {
             await resetToAuto(stream);
           } catch {}
@@ -595,10 +539,8 @@ export function CaptureTab({
       }
 
       // Ha a Pro Camera API nem működött, vagy nem támogatott, használjuk a frame átlagolást
-      if (!capturedBlob) {
+      if (!finalImageData) {
         // === EFFEKTV HOSSZÚ EXPOZÍCIÓ (fallback) ===
-        // A webböngészők nem mindig tudnak valódi hosszú expozíciót, ezért
-        // több képkockát készítünk a video stream-ből és átlagoljuk.
         setCaptureMethod(
           proCaps?.exposureTimeSupported
             ? "Frame átlagolás (Pro API hiba)"
