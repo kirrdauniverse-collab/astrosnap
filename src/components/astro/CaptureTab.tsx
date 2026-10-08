@@ -474,6 +474,75 @@ export function CaptureTab({
       let capturedBlob: Blob | null = null;
       let captureFormat = "jpeg";
 
+      // === NATÍV CAMERA2 API ELLENŐRZÉSE ===
+      // Ha az app Capacitor wrapper-ben fut Androidon (APK),
+      // a natív Camera2Plugin elérhető lesz, és valódi hosszú expozíciót végez!
+      const { isNativeCamera2Available, captureWithNativeCamera2 } =
+        await import("@/lib/processing/nativeCameraBridge");
+
+      if (isNativeCamera2Available()) {
+        setCaptureMethod("Natív Camera2 API (valódi hosszú záridő)");
+        console.log(`📸 Natív Camera2 API: ${exposureTime}s, ISO ${settings.iso}`);
+
+        try {
+          const nativeResult = await captureWithNativeCamera2(settings, (p, msg) => {
+            setCaptureProgress(p);
+            setProgressMsg(msg);
+          });
+
+          if (nativeResult && nativeResult.success) {
+            // A natív plugin fájlba mentette a képet (DNG vagy JPEG)
+            // Beolvassuk a fájlt és ImageData-vá alakítjuk
+            const response = await fetch(`file://${nativeResult.path}`);
+            const blob = await response.blob();
+
+            // Ha DNG, dekódoljuk a rawDecoder segítségével
+            const { decodeImageFile } = await import("@/lib/processing/rawDecoder");
+            const imageData = await decodeImageFile(blob, nativeResult.path, 4096);
+
+            finalImageData = imageData;
+            actualWidth = imageData.width;
+            actualHeight = imageData.height;
+            framesCaptured = 1;
+            captureFormat = nativeResult.format;
+            capturedBlob = blob;
+            setCaptureProgress(100);
+            console.log(`✓ Natív hosszú expozíció kész: ${actualWidth}×${actualHeight}`);
+
+            // Mentés a könyvtárba
+            const thumbnail = await imageDataToThumbnail(finalImageData, 400);
+            const stored: StoredImage = {
+              id: genId("light"),
+              type: "light",
+              target,
+              blob: capturedBlob,
+              thumbnail,
+              capturedAt: Date.now(),
+              settings: {
+                iso: settings.iso,
+                exposureSeconds: settings.exposureSeconds,
+                whiteBalanceK: settings.whiteBalanceK,
+              },
+              metadata: {
+                width: actualWidth,
+                height: actualHeight,
+                iso: settings.iso,
+                exposureSeconds: settings.exposureSeconds,
+                bortle: sky.bortle,
+                equipment,
+                label: `${TARGETS.find((t) => t.type === target)?.label ?? "Light"} • ${
+                  captureFormat === "dng" ? "DNG (RAW)" : "JPEG"
+                } • ${formatExposure(settings.exposureSeconds)} • Natív API`,
+              },
+            };
+            await saveImage(stored);
+            return stored;
+          }
+        } catch (nativeErr) {
+          console.warn("Natív Camera2 API hiba, váltás webes módra:", nativeErr);
+        }
+      }
+
       // === PRO CAMERA API: grabFrame() a video stream-ből ===
       // A kulcsfelismerés: takePhoto() IGNOREÁLJA a track exposure beállításait!
       // De grabFrame() a video stream-ből vesz egy frame-et, ami már be van
