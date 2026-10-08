@@ -455,37 +455,128 @@ export function CaptureTab({
   // Különben az ImageCapture API-t használja (teljes szenzor felbontás) ha elérhető.
   const [isCapturing, setIsCapturing] = useState(false);
   const [captureProgress, setCaptureProgress] = useState(0);
+  const [captureMethod, setCaptureMethod] = useState<string>("");
 
   const captureAndStore = useCallback(async () => {
     if (!videoRef.current || !canvasRef.current) return null;
     setIsCapturing(true);
     setCaptureProgress(0);
+    setCaptureMethod("");
     try {
       const video = videoRef.current;
       const mainCanvas = canvasRef.current;
-
-      // Az expozíciós idő (másodperc). Ha > 0.5s és < 60s, érdemes "effektív hosszú expozíciót" használni
       const exposureTime = settings.exposureSeconds;
-      const useEffectiveLongExposure = exposureTime >= 1;
 
       let finalImageData: ImageData;
       let actualWidth: number;
       let actualHeight: number;
       let framesCaptured = 1;
+      let capturedBlob: Blob | null = null;
+      let captureFormat = "jpeg";
 
-      if (useEffectiveLongExposure) {
-        // === EFFEKTV HOSSZÚ EXPOZÍCIÓ ===
-        // A webböngészők nem tudnak valódi hosszú expozíciót, ezért
+      // === PRO CAMERA API: ImageCapture.takePhoto PhotoSettings-szel ===
+      // Ez a valódi profi mód - ha a telefon támogatja, ténylegesen
+      // beállítja a hosszú záridőt (exposureTime nanosecumban), ISO-t, fókuszt!
+      // Nem frame átlagolás, hanem a szenzor valódi expozíciója.
+      const { captureWithProSettings, getProCameraCapabilities, secondsToNanoseconds, captureRawDng } =
+        await import("@/lib/processing/proCamera");
+
+      let proCaps = null;
+      if (stream) {
+        try {
+          proCaps = await getProCameraCapabilities(stream);
+          console.log("📷 Pro kamera képességek:", proCaps);
+        } catch (e) {
+          console.warn("Pro kamera képességek lekérése sikertelen:", e);
+        }
+      }
+
+      // Ha a telefon támogatja a hosszú záridőt, használjuk a Pro Camera API-t!
+      // Ez a kulcsfontosságú rész - ténylegesen beállítjuk az exposureTime-ot
+      if (stream && proCaps && proCaps.exposureTimeSupported) {
+        try {
+          setCaptureMethod("Pro Camera API (valódi hosszú záridő)");
+          console.log(
+            `📸 Pro Camera API: ${exposureTime}s expozíció → ${secondsToNanoseconds(exposureTime)}ns, ISO ${settings.iso}`
+          );
+
+          // Próbáljuk meg DNG (RAW) kimenetet kérni, ha a telefon támogatja
+          const dngBlob = await captureRawDng(stream, {
+            exposureTime: secondsToNanoseconds(exposureTime),
+            iso: settings.iso,
+            focusMode: settings.focusMode === "infinity" ? "manual" : settings.focusMode,
+            focusDistance: 0, // végtelen fókusz asztrofotózáshoz
+            whiteBalanceMode: "auto",
+            imageWidth: 4096,
+            imageHeight: 3072,
+          });
+
+          if (dngBlob) {
+            // DNG (RAW) kimenetet kaptunk!
+            capturedBlob = dngBlob;
+            captureFormat = "dng";
+            console.log("✓ DNG (RAW) kimenet sikeresen lekérve!");
+          } else {
+            // JPEG kimenet Pro beállításokkal
+            capturedBlob = await captureWithProSettings(
+              stream,
+              {
+                exposureTime: secondsToNanoseconds(exposureTime),
+                iso: settings.iso,
+                focusMode: settings.focusMode === "infinity" ? "manual" : settings.focusMode,
+                focusDistance: 0,
+                whiteBalanceMode: "auto",
+                imageWidth: 4096,
+                imageHeight: 3072,
+              },
+              proCaps
+            );
+            console.log("✓ Pro Camera API kép elkészült (JPEG)");
+          }
+
+          // A Blob-ot betöltjük képként, hogy ImageData-t nyerjünk belőle
+          if (capturedBlob) {
+            const url = URL.createObjectURL(capturedBlob);
+            const img = new Image();
+            await new Promise<void>((resolve, reject) => {
+              img.onload = () => resolve();
+              img.onerror = () => reject(new Error("Kép betöltése sikertelen"));
+              img.src = url;
+            });
+            actualWidth = img.naturalWidth;
+            actualHeight = img.naturalHeight;
+            mainCanvas.width = actualWidth;
+            mainCanvas.height = actualHeight;
+            const ctx = mainCanvas.getContext("2d")!;
+            ctx.drawImage(img, 0, 0, actualWidth, actualHeight);
+            finalImageData = ctx.getImageData(0, 0, actualWidth, actualHeight);
+            URL.revokeObjectURL(url);
+            setCaptureProgress(100);
+          } else {
+            throw new Error("Pro Camera API nem adott vissza Blob-ot");
+          }
+        } catch (proErr) {
+          console.warn(
+            "Pro Camera API sikertelen, váltás frame átlagolásra:",
+            proErr
+          );
+          // Fallback a frame átlagolásra
+          capturedBlob = null;
+        }
+      }
+
+      // Ha a Pro Camera API nem működött, vagy nem támogatott, használjuk a frame átlagolást
+      if (!capturedBlob) {
+        // === EFFEKTV HOSSZÚ EXPOZÍCIÓ (fallback) ===
+        // A webböngészők nem mindig tudnak valódi hosszú expozíciót, ezért
         // több képkockát készítünk a video stream-ből és átlagoljuk.
-        //
-        // A képkockák számát úgy választjuk meg, hogy a teljes gyűjtési idő
-        // megközelítse a beállított expozíciós időt.
-        // - A video stream általában 30 FPS, de a drawImage + getImageData ~80-100ms
-        // - Ezért ha pl. 17.7s expozíciót kérünk, kb. 17.7 / 0.1 = 177 frame lenne
-        // - Ezt korlátozzuk max 60 frame-re (több felesleges lenne, csak lassítja)
-        // - A frameDelay-t 100ms-ra állítjuk, így 60 frame = 6s gyűjtési idő
-        // - Ha a beállított expozíció > 6s, akkor is 60 frame-t gyűjtünk
-        const frameDelayMs = 100; // 0.1s képkockák között
+        setCaptureMethod(
+          proCaps?.exposureTimeSupported
+            ? "Frame átlagolás (Pro API hiba)"
+            : "Frame átlagolás (Pro API nem támogatott)"
+        );
+
+        const frameDelayMs = 100;
         const maxFrames = 60;
         const minFrames = 5;
         const targetFrames = Math.min(
@@ -517,12 +608,8 @@ export function CaptureTab({
         setCaptureProgress(Math.round((framesCaptured / targetFrames) * 100));
 
         // További képkockák gyűjtése
-        // Megjegyzés: ez a módszer csak statikus vagy lassan változó jeleneteknél jó,
-        // asztrofotózásnál a csillagok elmozdulása miatt a stackelés előtt
-        // alignment szükséges (ez a Feldolgozás tab-on történik)
         for (let f = 1; f < targetFrames; f++) {
           await new Promise((resolve) => setTimeout(resolve, frameDelayMs));
-          // Ellenőrizzük, hogy a video még mindig aktív
           if (video.readyState !== 4) continue;
           firstCtx.drawImage(video, 0, 0, firstCanvas.width, firstCanvas.height);
           const frameData = firstCtx.getImageData(0, 0, firstCanvas.width, firstCanvas.height);
@@ -540,69 +627,21 @@ export function CaptureTab({
         }
         finalImageData = new ImageData(avgData, actualWidth, actualHeight);
         console.log(`✓ Effektív expozíció kész: ${framesCaptured} frame átlagolva, ${(totalCaptureTimeMs / 1000).toFixed(1)}s`);
-      } else {
-        // === RÖVID EXPOZÍCIÓ - egyetlen képkocka ===
-        // Próbáljuk meg az ImageCapture API-t használni a teljes szenzor felbontásért
-        let capturedBlob: Blob | null = null;
-        try {
-          if (stream && typeof ImageCapture !== "undefined") {
-            const track = stream.getVideoTracks()[0];
-            if (track) {
-              const imageCapture = new ImageCapture(track);
-              // Próbáljuk meg a legmagasabb felbontást
-              try {
-                capturedBlob = await imageCapture.takePhoto({
-                  imageWidth: { ideal: 4096 },
-                  imageHeight: { ideal: 3072 },
-                });
-              } catch {
-                // Fallback: alapértelmezett beállítások
-                capturedBlob = await imageCapture.takePhoto();
-              }
-            }
-          }
-        } catch (e) {
-          console.warn("ImageCapture nem elérhető, canvas capture:", e);
-        }
-
-        if (capturedBlob) {
-          // ImageCapture sikerült - betöltjük képként és ImageData-vá alakítjuk
-          const tmpImg = new Image();
-          const url = URL.createObjectURL(capturedBlob);
-          await new Promise<void>((resolve, reject) => {
-            tmpImg.onload = () => resolve();
-            tmpImg.onerror = () => reject(new Error("Kép betöltése sikertelen"));
-            tmpImg.src = url;
-          });
-          actualWidth = tmpImg.naturalWidth;
-          actualHeight = tmpImg.naturalHeight;
-          mainCanvas.width = actualWidth;
-          mainCanvas.height = actualHeight;
-          const ctx = mainCanvas.getContext("2d")!;
-          ctx.drawImage(tmpImg, 0, 0, actualWidth, actualHeight);
-          finalImageData = ctx.getImageData(0, 0, actualWidth, actualHeight);
-          URL.revokeObjectURL(url);
-        } else {
-          // Fallback: video frame capture
-          actualWidth = video.videoWidth || 1920;
-          actualHeight = video.videoHeight || 1080;
-          mainCanvas.width = actualWidth;
-          mainCanvas.height = actualHeight;
-          const ctx = mainCanvas.getContext("2d")!;
-          ctx.drawImage(video, 0, 0, actualWidth, actualHeight);
-          finalImageData = ctx.getImageData(0, 0, actualWidth, actualHeight);
-        }
       }
 
       // Mentés: JPEG formátum a jobb minőség/fájlméret arányért
       const blob = await imageDataToBlob(finalImageData);
       const thumbnail = await imageDataToThumbnail(finalImageData, 400);
 
+      // Ha DNG (RAW) formátumot kaptunk, és van capturedBlob, azt is elmentjük
+      // külön mezőként, hogy később letölthető legyen az eredeti RAW fájl.
+      // Azonban a IndexedDB-ben a blob mező csak egy Blob lehet,
+      // ezért ha DNG-t kaptunk, azt külön "rawBlob" néven mentjük.
       const stored: StoredImage = {
         id: genId("light"),
         type: "light",
         target,
-        blob,
+        blob: captureFormat === "dng" && capturedBlob ? capturedBlob : blob,
         thumbnail,
         capturedAt: Date.now(),
         settings: {
@@ -619,9 +658,11 @@ export function CaptureTab({
           equipment,
           stackCount: framesCaptured > 1 ? framesCaptured : undefined,
           label: `${TARGETS.find((t) => t.type === target)?.label ?? "Light"} • ${
-            framesCaptured > 1
+            captureFormat === "dng"
+              ? `DNG (RAW) • ${formatExposure(settings.exposureSeconds)} • Pro API`
+              : framesCaptured > 1
               ? `${framesCaptured} frame átlag • ${formatExposure(settings.exposureSeconds)}`
-              : formatExposure(settings.exposureSeconds)
+              : `${formatExposure(settings.exposureSeconds)} • ${captureMethod || "Pro API"}`
           }`,
         },
       };
