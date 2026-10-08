@@ -1,136 +1,94 @@
-// Pro Camera API - ImageCapture PhotoSettings használata
-// Ez a modul a MediaStreamTrack és ImageCapture API-kat használja
-// a valódi profi kamera vezérléshez:
+// Pro Camera API - ImageCapture PhotoSettings és MediaTrackConstraints
 //
-//  - Hosszú záridő (exposureTime) nanosecundumban - ténylegesen 1-30s!
-//  - Manual ISO (50-6400)
-//  - Manual fókusz (focusMode + focusDistance)
-//  - Manual fehérmérleg (whiteBalanceMode)
-//  - RAW (DNG) kimenet, ha a telefon támogatja
+// A kulcsfontosságú felismerés: az `exposureTime` csak akkor működik,
+// ha először `exposureMode: "manual"`-ra állítjuk a track-et!
+// Enélkül az automatikus expozíció (AE) felülírja a beállítást.
 //
-// Ezek a funkciók csak Chrome/Edge böngészőkben (Android) működnek,
-// és nem minden telefon támogatja őket. A capabilities() metódussal
-// ellenőrizhető, hogy mi érhető el.
+// A folyamat:
+// 1. track.applyConstraints({ advanced: [{ exposureMode: "manual", exposureTime, iso, ... }] })
+// 2. Várakozás, amíg a beállítások érvénybe lépnek (500ms)
+// 3. getSettings() ellenőrzése - logoljuk, hogy tényleg beállította-e
+// 4. imageCapture.takePhoto() - ez várni fog az expozíció befejezésére!
+// 5. Időtartam mérése - ha rögtön visszatér, nem volt hosszú expozíció
 
 export interface ProPhotoSettings {
   // Expozíciós idő nanosecundumban (1s = 1_000_000_000 ns)
-  // Maximum érték általában 30s (30_000_000_000 ns)
   exposureTime?: number;
-  // ISO érték (50-6400, ha a telefon támogatja)
+  // ISO érték
   iso?: number;
   // Fókusz mód
   focusMode?: "auto" | "manual" | "continuous";
-  // Fókusz távolság (0 = végtelen, magasabb érték = közelebbi fókusz)
+  // Fókusz távolság
   focusDistance?: number;
   // Fehérmérleg mód
   whiteBalanceMode?: "auto" | "manual" | "continuous";
-  // Kép szélessége (pixelben)
+  // Fehérmérleg hőmérséklet Kelvinben
+  whiteBalanceTemperature?: number;
+  // Kép szélessége
   imageWidth?: number;
-  // Kép magassága (pixelben)
+  // Kép magassága
   imageHeight?: number;
-  // Vörösszem csökkentés
-  redEyeReduction?: boolean;
-  // Fényforrás mód: "auto" | "off" | "flash" | "torch"
+  // Fényforrás mód
   fillLightMode?: "auto" | "off" | "flash" | "torch";
 }
 
 export interface ProCameraCapabilities {
-  // Hosszú záridő támogatás
   exposureTimeSupported: boolean;
-  // Minimális expozíciós idő nanosecumban
   minExposureTime: number;
-  // Maximális expozíciós idő nanosecumban
   maxExposureTime: number;
-  // ISO beállítás támogatás
   isoSupported: boolean;
-  // Minimális ISO
   minIso: number;
-  // Maximális ISO
   maxIso: number;
-  // Manual fókusz támogatás
   manualFocusSupported: boolean;
-  // Manual fehérmérleg támogatás
   manualWhiteBalanceSupported: boolean;
-  // Vörösszem csökkentés támogatás
-  redEyeReductionSupported: boolean;
-  // Fényforrás módok
   fillLightModes: string[];
-  // Elérhető felbontások (JPEG)
-  jpegResolutions: { width: number; height: number }[];
-  // RAW (DNG) formátum támogatás
   rawSupported: boolean;
 }
 
+// A TypeScript nem tartalmazza ezeket a típusokat, ezért definiáljuk őket
+interface ExtendedMediaTrackCapabilities extends MediaTrackCapabilities {
+  exposureTime?: { min: number; max: number; step: number };
+  iso?: { min: number; max: number; step: number };
+  exposureMode?: string[];
+  focusMode?: string[];
+  focusDistance?: { min: number; max: number; step: number };
+  whiteBalanceMode?: string[];
+  whiteBalanceTemperature?: { min: number; max: number; step: number };
+  fillLightMode?: string[];
+  torch?: boolean;
+}
+
+interface ExtendedMediaTrackSettings extends MediaTrackSettings {
+  exposureTime?: number;
+  iso?: number;
+  exposureMode?: string;
+  focusMode?: string;
+  focusDistance?: number;
+  whiteBalanceMode?: string;
+  whiteBalanceTemperature?: number;
+}
+
+interface ExtendedMediaTrackConstraintSet extends MediaTrackConstraintSet {
+  exposureTime?: number;
+  iso?: number;
+  exposureMode?: string;
+  focusMode?: string;
+  focusDistance?: number;
+  whiteBalanceMode?: string;
+  whiteBalanceTemperature?: number;
+  torch?: boolean;
+}
+
 /**
- * Lekéri a kamera képességeit (capabilities) a MediaStreamTrack-ből.
- * Ez a funkció a `track.getCapabilities()` és `track.getSettings()` hívásokat használja.
- *
- * @param stream A MediaStream, amit a getUserMedia adott vissza
- * @returns A kamera képességei, vagy null ha nem elérhető
+ * Lekéri a kamera képességeit (capabilities).
  */
 export async function getProCameraCapabilities(
   stream: MediaStream
 ): Promise<ProCameraCapabilities | null> {
   const track = stream.getVideoTracks()[0];
-  if (!track) return null;
+  if (!track || !track.getCapabilities) return null;
 
-  // A TypeScript nem ismeri a getCapabilities metódust típusosan,
-  // ezért cast-olunk egy kiterjesztett típusra
-  interface TrackCapabilities {
-    exposureTime?: { min: number; max: number; step: number };
-    iso?: { min: number; max: number; step: number };
-    focusMode?: string[];
-    focusDistance?: { min: number; max: number; step: number };
-    whiteBalanceMode?: string[];
-    redEyeReduction?: boolean;
-    fillLightMode?: string[];
-    torch?: boolean;
-    width?: { min: number; max: number };
-    height?: { min: number; max: number };
-  }
-
-  interface TrackSettings {
-    exposureTime?: number;
-    iso?: number;
-    focusMode?: string;
-    focusDistance?: number;
-    whiteBalanceMode?: string;
-    whiteBalanceTemperature?: number;
-  }
-
-  const capabilities =
-    (track.getCapabilities?.() ?? {}) as unknown as TrackCapabilities;
-  const settings = (track.getSettings?.() ?? {}) as unknown as TrackSettings;
-
-  // JPEG felbontások lekérése a SCALER_STREAM_CONFIGURATION_MAP-ből
-  let jpegResolutions: { width: number; height: number }[] = [];
-  try {
-    const track2 = track as unknown as {
-      getCapabilities: () => {
-        SCALER_STREAM_CONFIGURATION_MAP?: unknown;
-      };
-    };
-    const caps = track2.getCapabilities?.();
-    // A JPEG felbontások a PhotoCapabilities-ből is lekérhetők
-    if (typeof ImageCapture !== "undefined") {
-      const imageCapture = new ImageCapture(track);
-      try {
-        const photoCaps = await imageCapture.getPhotoCapabilities();
-        if (photoCaps.imageWidth && photoCaps.imageHeight) {
-          jpegResolutions = [
-            {
-              width: photoCaps.imageWidth.max || 4096,
-              height: photoCaps.imageHeight.max || 3072,
-            },
-          ];
-        }
-      } catch {
-        // Ha nem sikerül, üresen hagyjuk
-      }
-    }
-  } catch {
-    // Ha nem sikerül, üresen hagyjuk
-  }
+  const capabilities = track.getCapabilities() as ExtendedMediaTrackCapabilities;
 
   return {
     exposureTimeSupported: !!capabilities.exposureTime,
@@ -139,147 +97,188 @@ export async function getProCameraCapabilities(
     isoSupported: !!capabilities.iso,
     minIso: capabilities.iso?.min ?? 0,
     maxIso: capabilities.iso?.max ?? 0,
-    manualFocusSupported:
-      !!capabilities.focusMode && !!capabilities.focusDistance,
+    manualFocusSupported: !!capabilities.focusMode && !!capabilities.focusDistance,
     manualWhiteBalanceSupported: !!capabilities.whiteBalanceMode,
-    redEyeReductionSupported: capabilities.redEyeReduction ?? false,
     fillLightModes: capabilities.fillLightMode ?? [],
-    jpegResolutions,
-    rawSupported: false, // Később ellenőrizzük
+    rawSupported: false,
   };
 }
 
 /**
- * Átalakítja a felhasználói beállításokat PhotoSettings objektummá,
- * amit az ImageCapture.takePhoto() metódusnak lehet átadni.
+ * BEÁLLÍTJA a kamera track-jét a megadott profi beállításokra.
+ * Ez a kulcsfontosságú lépés - a track constraints-eket kell beállítani,
+ * nem csak a PhotoSettings-t átadni a takePhoto-nak!
  *
- * @param settings A felhasználói beállítások
- * @param capabilities A kamera képességei (opcionális, ellenőrzéshez)
- * @returns A PhotoSettings objektum az ImageCapture API-nak
+ * @param stream A MediaStream
+ * @param settings A beállítások
+ * @returns A ténylegesen alkalmazott beállítások (getSettings-ből)
  */
-export function buildPhotoSettings(
-  settings: ProPhotoSettings,
-  capabilities?: ProCameraCapabilities
-): PhotoSettings {
-  const photoSettings: PhotoSettings = {};
+export async function applyProCameraSettings(
+  stream: MediaStream,
+  settings: ProPhotoSettings
+): Promise<ExtendedMediaTrackSettings> {
+  const track = stream.getVideoTracks()[0];
+  if (!track) {
+    throw new Error("Nincs videó track a stream-ben");
+  }
 
-  // Expozíciós idő (ha támogatott és be van állítva)
-  if (
-    settings.exposureTime !== undefined &&
-    (!capabilities || capabilities.exposureTimeSupported)
-  ) {
-    // Ellenőrizzük, hogy a tartományon belül van-e
-    let exposure = settings.exposureTime;
-    if (capabilities) {
-      exposure = Math.max(
-        capabilities.minExposureTime,
-        Math.min(capabilities.maxExposureTime, exposure)
-      );
+  console.log("📷 Pro Camera beállítások alkalmazása a track-re:", settings);
+
+  // A constraint-ek összeállítása
+  // FONTOS: exposureMode: "manual" kell, különben az exposureTime-t figyelmen kívül hagyja!
+  const constraints: ExtendedMediaTrackConstraintSet = {};
+
+  if (settings.exposureTime !== undefined) {
+    constraints.exposureMode = "manual";
+    constraints.exposureTime = settings.exposureTime;
+    console.log(`  → exposureMode: "manual", exposureTime: ${settings.exposureTime} ns (${(settings.exposureTime / 1_000_000_000).toFixed(2)}s)`);
+  }
+
+  if (settings.iso !== undefined) {
+    constraints.iso = settings.iso;
+    console.log(`  → iso: ${settings.iso}`);
+  }
+
+  if (settings.focusMode === "manual") {
+    constraints.focusMode = "manual";
+    if (settings.focusDistance !== undefined) {
+      constraints.focusDistance = settings.focusDistance;
     }
-    photoSettings.exposureTime = exposure;
+    console.log(`  → focusMode: "manual", focusDistance: ${settings.focusDistance}`);
+  } else if (settings.focusMode === "continuous") {
+    constraints.focusMode = "continuous";
   }
 
-  // ISO (ha támogatott és be van állítva)
-  if (settings.iso !== undefined && (!capabilities || capabilities.isoSupported)) {
-    let iso = settings.iso;
-    if (capabilities) {
-      iso = Math.max(capabilities.minIso, Math.min(capabilities.maxIso, iso));
+  if (settings.whiteBalanceMode === "manual") {
+    constraints.whiteBalanceMode = "manual";
+    if (settings.whiteBalanceTemperature !== undefined) {
+      constraints.whiteBalanceTemperature = settings.whiteBalanceTemperature;
     }
-    photoSettings.iso = iso;
+    console.log(`  → whiteBalanceMode: "manual", whiteBalanceTemperature: ${settings.whiteBalanceTemperature}K`);
+  } else if (settings.whiteBalanceMode === "continuous") {
+    constraints.whiteBalanceMode = "continuous";
   }
 
-  // Fókusz mód
-  if (settings.focusMode) {
-    // "continuous" -> "continuous" (a PhotoSettings ezt várja)
-    // "auto" -> "single-shot" (de a szabvány "auto"-t is elfogadja)
-    if (settings.focusMode === "manual") {
-      photoSettings.focusMode = "manual";
-    } else if (settings.focusMode === "continuous") {
-      photoSettings.focusMode = "continuous";
-    } else {
-      photoSettings.focusMode = "single-shot";
-    }
+  // Alkalmazzuk a constraint-eket
+  try {
+    await track.applyConstraints({
+      advanced: [constraints as MediaTrackConstraintSet],
+    });
+    console.log("✓ Track constraints alkalmazva");
+  } catch (err) {
+    console.error("✗ Track constraints alkalmazása sikertelen:", err);
+    throw new Error(`Track constraints hiba: ${err}`);
   }
 
-  // Fókusz távolság (csak manual módban)
-  if (settings.focusMode === "manual" && settings.focusDistance !== undefined) {
-    photoSettings.focusDistance = settings.focusDistance;
+  // Várakozunk, hogy a beállítások érvénybe lépjenek
+  // A kamera hardvernek idő kell, hogy változtassa az expozíciós beállításokat
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  console.log("⏱ Vártunk 800ms-t a beállítások érvénybe lépésére");
+
+  // Ellenőrizzük a beállításokat
+  const actualSettings = track.getSettings() as ExtendedMediaTrackSettings;
+  console.log("📋 Tényleges beállítások a getSettings-ből:", {
+    exposureMode: actualSettings.exposureMode,
+    exposureTime: actualSettings.exposureTime,
+    iso: actualSettings.iso,
+    focusMode: actualSettings.focusMode,
+    focusDistance: actualSettings.focusDistance,
+    whiteBalanceMode: actualSettings.whiteBalanceMode,
+    whiteBalanceTemperature: actualSettings.whiteBalanceTemperature,
+  });
+
+  // Ha az exposureTime nem egyezik, figyelmeztetünk
+  if (settings.exposureTime !== undefined && actualSettings.exposureTime !== settings.exposureTime) {
+    console.warn(
+      `⚠ Az exposureTime nem egyezik! Beállított: ${settings.exposureTime}, tényleges: ${actualSettings.exposureTime}`
+    );
   }
 
-  // Fehérmérleg mód
-  if (settings.whiteBalanceMode) {
-    if (settings.whiteBalanceMode === "manual") {
-      photoSettings.whiteBalanceMode = "manual";
-    } else if (settings.whiteBalanceMode === "continuous") {
-      photoSettings.whiteBalanceMode = "continuous";
-    } else {
-      photoSettings.whiteBalanceMode = "single-shot";
-    }
-  }
-
-  // Kép mérete
-  if (settings.imageWidth !== undefined) {
-    photoSettings.imageWidth = settings.imageWidth;
-  }
-  if (settings.imageHeight !== undefined) {
-    photoSettings.imageHeight = settings.imageHeight;
-  }
-
-  // Vörösszem csökkentés
-  if (settings.redEyeReduction !== undefined) {
-    photoSettings.redEyeReduction = settings.redEyeReduction;
-  }
-
-  // Fényforrás mód (vaku)
-  if (settings.fillLightMode) {
-    photoSettings.fillLightMode = settings.fillLightMode;
-  }
-
-  return photoSettings;
+  return actualSettings;
 }
 
 /**
  * Készít egy képet a megadott profi beállításokkal.
- * Ha a telefon támogatja az ImageCapture API-t és a PhotoSettings-t,
- * akkor ténylegesen hosszú záridővel és manual ISO-val készíti a képet.
+ * Ez a függvény:
+ * 1. Beállítja a track constraint-eket (exposureMode=manual, exposureTime, iso, focusMode, stb.)
+ * 2. Vár 800ms-t, hogy a beállítások érvénybe lépjenek
+ * 3. Meghívja az imageCapture.takePhoto()-t, ami VÁRNI FOG az expozíció befejezésére!
+ * 4. Méri a takePhoto időtartamát - ha < 1s, akkor nem volt hosszú expozíció
  *
  * @param stream A MediaStream
  * @param settings A profi beállítások
- * @param capabilities A kamera képességei (opcionális)
- * @returns Blob a képpel (JPEG vagy DNG formátumban)
+ * @returns Blob a képpel
  */
 export async function captureWithProSettings(
   stream: MediaStream,
-  settings: ProPhotoSettings,
-  capabilities?: ProCameraCapabilities
+  settings: ProPhotoSettings
 ): Promise<Blob> {
   const track = stream.getVideoTracks()[0];
   if (!track) {
     throw new Error("Nincs videó track a stream-ben");
   }
 
+  // 1. Beállítjuk a track-et (exposureMode=manual, exposureTime, iso, stb.)
+  await applyProCameraSettings(stream, settings);
+
+  // 2. takePhoto - ez várni fog, amíg a szenzor befejezi az expozíciót!
   if (typeof ImageCapture === "undefined") {
-    throw new Error(
-      "ImageCapture API nem támogatott ebben a böngészőben. " +
-        "Próbáld Chrome vagy Edge böngészővel Androidon."
-    );
+    throw new Error("ImageCapture API nem támogatott");
   }
 
   const imageCapture = new ImageCapture(track);
-  const photoSettings = buildPhotoSettings(settings, capabilities);
 
-  // Ha ImageCapture.takePhoto elérhető, használjuk
-  // Ez visszaadhat JPEG vagy DNG Blob-ot, a track képességeitől függően
+  console.log(`📸 takePhoto() hívása... (várjuk a ${
+    settings.exposureTime ? (settings.exposureTime / 1_000_000_000).toFixed(2) + "s expozíciót" : "képet"
+  })`);
+
+  const startTime = performance.now();
+
   try {
+    // A takePhoto PhotoSettings is megkapja a beállításokat,
+    // de a track constraints a fontosabb
+    const photoSettings: PhotoSettings = {
+      imageWidth: settings.imageWidth,
+      imageHeight: settings.imageHeight,
+    };
+
+    // Ha az exposureTime be van állítva, azt is átadhatjuk a PhotoSettings-nek
+    // (a track constraints már beállította, de redundancy nem árt)
+    if (settings.exposureTime !== undefined) {
+      (photoSettings as PhotoSettings & { exposureTime?: number }).exposureTime = settings.exposureTime;
+    }
+    if (settings.iso !== undefined) {
+      (photoSettings as PhotoSettings & { iso?: number }).iso = settings.iso;
+    }
+
     const blob = await imageCapture.takePhoto(photoSettings);
+    const duration = performance.now() - startTime;
+    const durationSec = (duration / 1000).toFixed(2);
+
+    console.log(`✓ takePhoto() befejezve ${durationSec}s alatt!`);
+
+    // Ha a beállított expozíció > 1s, de a takePhoto < 1s volt,
+    // akkor a telefon valószínűleg nem támogatja a valódi hosszú expozíciót
+    if (settings.exposureTime && settings.exposureTime > 1_000_000_000 && duration < 1000) {
+      console.warn(
+        `⚠ FIGYELMEZTETÉS: A beállított expozíció ${(
+          settings.exposureTime / 1_000_000_000
+        ).toFixed(2)}s volt, de a takePhoto csak ${durationSec}s-ig tartott! ` +
+          `Ez azt jelenti, hogy a telefon NEM végezte el a valódi hosszú expozíciót.`
+      );
+    } else if (settings.exposureTime && settings.exposureTime > 1_000_000_000) {
+      console.log(
+        `✓ Hosszú expozíció megerősítve: ${durationSec}s (beállított: ${(
+          settings.exposureTime / 1_000_000_000
+        ).toFixed(2)}s)`
+      );
+    }
+
     return blob;
   } catch (err) {
-    // Ha a PhotoSettings elutasításra kerül, próbáljuk meg alapértelmezett beállításokkal
-    console.warn(
-      "PhotoSettings elutasítva, próbáljuk alapértelmezett beállításokkal:",
-      err
-    );
-    return await imageCapture.takePhoto();
+    const duration = performance.now() - startTime;
+    console.error(`✗ takePhoto hiba ${duration}ms után:`, err);
+    throw err;
   }
 }
 
@@ -287,15 +286,15 @@ export async function captureWithProSettings(
  * Ellenőrzi, hogy a böngésző támogatja-e a Pro Camera funkciókat.
  */
 export function isProCameraSupported(): boolean {
-  return typeof ImageCapture !== "undefined" && typeof navigator !== "undefined" && !!navigator.mediaDevices;
+  return (
+    typeof ImageCapture !== "undefined" &&
+    typeof navigator !== "undefined" &&
+    !!navigator.mediaDevices
+  );
 }
 
 /**
  * Átalakítja a másodpercben megadott expozíciós időt nanosecundumba.
- * (Az ImageCapture API nanosecundumban várja az exposureTime-ot.)
- *
- * @param seconds Expozíciós idő másodpercben
- * @returns Expozíciós idő nanosecundumban
  */
 export function secondsToNanoseconds(seconds: number): number {
   return Math.round(seconds * 1_000_000_000);
@@ -303,74 +302,61 @@ export function secondsToNanoseconds(seconds: number): number {
 
 /**
  * Átalakítja a nanosecundumban megadott expozíciós időt másodperccé.
- *
- * @param ns Expozíciós idő nanosecundumban
- * @returns Expozíciós idő másodpercben
  */
 export function nanosecondsToSeconds(ns: number): number {
   return ns / 1_000_000_000;
 }
 
 /**
- * Formázza az expozíciós időt ember-olvasható formára.
- *
- * @param seconds Expozíciós idő másodpercben
- * @returns Formázott string, pl. "1/500 s", "2.5 s", "30 s"
+ * Visszaállítja a kamerát auto módra (a capture után).
  */
-export function formatExposureTime(seconds: number): string {
-  if (seconds < 1) {
-    const denom = Math.round(1 / seconds);
-    return `1/${denom} s`;
+export async function resetToAuto(stream: MediaStream): Promise<void> {
+  const track = stream.getVideoTracks()[0];
+  if (!track || !track.applyConstraints) return;
+
+  try {
+    await track.applyConstraints({
+      advanced: [
+        {
+          exposureMode: "continuous",
+          focusMode: "continuous",
+          whiteBalanceMode: "continuous",
+        } as MediaTrackConstraintSet,
+      ],
+    });
+    console.log("✓ Kamera visszaállítva auto módra");
+  } catch (err) {
+    console.warn("Visszaállítás auto módra sikertelen:", err);
   }
-  if (seconds < 10) {
-    return `${seconds.toFixed(1)} s`;
-  }
-  return `${Math.round(seconds)} s`;
 }
 
 /**
- * Megpróbálja DNG (RAW) kimenetet kérni a kamerától.
+ * Próbál DNG (RAW) kimenetet kérni.
  * Ez csak akkor működik, ha a telefon támogatja a RAW formátumot.
- *
- * A legtöbb modern Android telefon (Samsung Galaxy S21+, Pixel 5+, stb.)
- * támogatja a DNG kimenetet az ImageCapture API-n keresztül.
- *
- * @param stream A MediaStream
- * @returns Blob a DNG fájllal, vagy null ha nem támogatott
  */
 export async function captureRawDng(
   stream: MediaStream,
   settings: ProPhotoSettings = {}
 ): Promise<Blob | null> {
   const track = stream.getVideoTracks()[0];
-  if (!track) return null;
+  if (!track || typeof ImageCapture === "undefined") return null;
 
-  if (typeof ImageCapture === "undefined") {
+  // Ellenőrizzük, hogy a track támogatja-e a RAW formátumot
+  const caps = track.getCapabilities() as ExtendedMediaTrackCapabilities & {
+    raw?: boolean;
+  };
+  if (!caps.raw) {
     return null;
   }
 
-  // Ellenőrizzük, hogy a track támogatja-e a RAW formátumot
-  // A `getCapabilities()` visszaadja a támogatott formátumokat
-  interface TrackCapabilities {
-    raw?: boolean;
-    [key: string]: unknown;
-  }
-  const caps = (track.getCapabilities?.() ?? {}) as unknown as TrackCapabilities;
-
-  // Ha van "raw" képesség, próbáljuk meg DNG-t kérni
-  if (!caps.raw) {
-    return null; // Nem támogatott
-  }
-
   try {
+    // Beállítjuk a track-et először
+    await applyProCameraSettings(stream, settings);
+
     const imageCapture = new ImageCapture(track);
-    // A takePhoto visszaadhat DNG Blob-ot, ha a track támogatja
-    // Nincs külön "format" beállítás, a kimeneti formátum a track képességeitől függ
-    const photoSettings = buildPhotoSettings(settings);
-    const blob = await imageCapture.takePhoto(photoSettings);
+    const blob = await imageCapture.takePhoto();
 
     // Ellenőrizzük a Blob típusát
-    // Ha "image/x-adobe-dng" vagy "image/dng", akkor DNG-t kaptunk
     if (
       blob.type.includes("dng") ||
       blob.type.includes("raw") ||
@@ -378,9 +364,6 @@ export async function captureRawDng(
     ) {
       return blob;
     }
-
-    // Ha JPEG-et kaptunk, de a telefon támogatja a RAW-t,
-    // próbáljuk meg újra más beállításokkal
     return null;
   } catch {
     return null;
